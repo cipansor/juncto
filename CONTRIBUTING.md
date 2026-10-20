@@ -33,7 +33,7 @@ Run all four from the repository root and make sure they pass:
 ```sh
 cargo fmt --all -- --check                 # formatting
 cargo clippy --workspace -- -D warnings    # lints; a warning fails the build
-cargo test --workspace                     # 126 unit tests
+cargo test --workspace                     # 129 unit tests
 cd tests/e2e && npx playwright test        # end-to-end suite
 ```
 

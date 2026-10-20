@@ -156,7 +156,7 @@ Run everything from the repository root:
 ```sh
 cargo fmt --all -- --check                    # formatting
 cargo clippy --workspace -- -D warnings       # lints, warnings are errors
-cargo test --workspace                        # 126 unit tests
+cargo test --workspace                        # 129 unit tests
 cd tests/e2e && npx playwright test           # end-to-end parity + visual suite
 ```
 
