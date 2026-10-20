@@ -66,7 +66,13 @@ fn lag_resync_messages(state: &Arc<AppState>, room_id: Option<String>) -> Vec<Se
     let polls: Vec<Poll> = state.polls.lock().unwrap().values().cloned().collect();
     msgs.push(ServerMessage::PollsList(polls));
 
-    let rooms: Vec<BreakoutRoom> = state.breakout_rooms.lock().unwrap().values().cloned().collect();
+    let rooms: Vec<BreakoutRoom> = state
+        .breakout_rooms
+        .lock()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect();
     msgs.push(ServerMessage::BreakoutRoomsList(rooms));
 
     let whiteboard = state.whiteboard.lock().unwrap().clone();
@@ -2465,8 +2471,16 @@ mod tests {
         let state = create_mock_state();
 
         // Two participants: one in the main room (None), one in breakout "b1".
-        state.participants.lock().unwrap().insert("main".into(), participant("main"));
-        state.participants.lock().unwrap().insert("break".into(), participant("break"));
+        state
+            .participants
+            .lock()
+            .unwrap()
+            .insert("main".into(), participant("main"));
+        state
+            .participants
+            .lock()
+            .unwrap()
+            .insert("break".into(), participant("break"));
         state
             .participant_locations
             .lock()
@@ -2480,14 +2494,18 @@ mod tests {
 
         state.breakout_rooms.lock().unwrap().insert(
             "b1".into(),
-            BreakoutRoom { id: "b1".into(), name: "Room 1".into() },
+            BreakoutRoom {
+                id: "b1".into(),
+                name: "Room 1".into(),
+            },
         );
 
         // A missed `VideoStopped` must be repaired even when nothing is shared,
         // otherwise a stale video stays pinned on the client.
         let msgs = lag_resync_messages(&state, None);
         assert!(
-            msgs.iter().any(|m| matches!(m, ServerMessage::VideoStopped)),
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::VideoStopped)),
             "resync must always carry the current shared-video state"
         );
 
@@ -2496,7 +2514,11 @@ mod tests {
             ServerMessage::ParticipantList(list) => Some(list.clone()),
             _ => None,
         });
-        let ids: Vec<String> = list.expect("participant list").into_iter().map(|p| p.id).collect();
+        let ids: Vec<String> = list
+            .expect("participant list")
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
         assert_eq!(ids, vec!["main".to_string()]);
 
         // The breakout-room participant's recovery is scoped to their room.
@@ -2505,7 +2527,11 @@ mod tests {
             ServerMessage::ParticipantList(list) => Some(list.clone()),
             _ => None,
         });
-        let ids: Vec<String> = list.expect("participant list").into_iter().map(|p| p.id).collect();
+        let ids: Vec<String> = list
+            .expect("participant list")
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
         assert_eq!(ids, vec!["break".to_string()]);
     }
 
@@ -2513,14 +2539,18 @@ mod tests {
     fn lag_resync_includes_chat_polls_whiteboard_and_rooms() {
         let state = create_mock_state();
 
-        state.chat_history.lock().unwrap().push(shared::ChatMessage {
-            user_id: "u".into(),
-            content: "hi".into(),
-            recipient_id: None,
-            timestamp: 1,
-            attachment: None,
-            room_id: None,
-        });
+        state
+            .chat_history
+            .lock()
+            .unwrap()
+            .push(shared::ChatMessage {
+                user_id: "u".into(),
+                content: "hi".into(),
+                recipient_id: None,
+                timestamp: 1,
+                attachment: None,
+                room_id: None,
+            });
         state.polls.lock().unwrap().insert(
             "p1".into(),
             Poll {
@@ -2544,15 +2574,33 @@ mod tests {
         });
         state.breakout_rooms.lock().unwrap().insert(
             "b1".into(),
-            BreakoutRoom { id: "b1".into(), name: "Room 1".into() },
+            BreakoutRoom {
+                id: "b1".into(),
+                name: "Room 1".into(),
+            },
         );
         *state.shared_video_url.lock().unwrap() = Some("https://v".into());
 
         let msgs = lag_resync_messages(&state, None);
-        assert!(msgs.iter().any(|m| matches!(m, ServerMessage::ChatHistory(h) if h.len() == 1)));
-        assert!(msgs.iter().any(|m| matches!(m, ServerMessage::PollsList(p) if p.len() == 1)));
-        assert!(msgs.iter().any(|m| matches!(m, ServerMessage::WhiteboardHistory(w) if w.len() == 1)));
-        assert!(msgs.iter().any(|m| matches!(m, ServerMessage::BreakoutRoomsList(r) if r.len() == 1)));
-        assert!(msgs.iter().any(|m| matches!(m, ServerMessage::VideoShared(u) if u == "https://v")));
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::ChatHistory(h) if h.len() == 1))
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::PollsList(p) if p.len() == 1))
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::WhiteboardHistory(w) if w.len() == 1))
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::BreakoutRoomsList(r) if r.len() == 1))
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::VideoShared(u) if u == "https://v"))
+        );
     }
 }

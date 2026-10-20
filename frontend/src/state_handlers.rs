@@ -395,7 +395,9 @@ pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
                     let mut merged = history;
                     for m in msgs.iter() {
                         if !merged.iter().any(|x| {
-                            x.timestamp == m.timestamp && x.user_id == m.user_id && x.content == m.content
+                            x.timestamp == m.timestamp
+                                && x.user_id == m.user_id
+                                && x.content == m.content
                         }) {
                             merged.push(m.clone());
                         }
