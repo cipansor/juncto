@@ -8,6 +8,7 @@ use wasm_bindgen::JsCast;
 pub fn Whiteboard(
     on_draw: Callback<DrawAction>,
     history: ReadSignal<Vec<DrawAction>>,
+    reset: ReadSignal<u32>,
     my_id: ReadSignal<Option<String>>,
     is_visitor: Signal<bool>,
 ) -> impl IntoView {
@@ -56,6 +57,29 @@ pub fn Whiteboard(
             }
         }
         len
+    });
+
+    // When the server sends an authoritative snapshot (e.g. after it evicted
+    // strokes), clear the canvas and repaint everything currently retained.
+    Effect::new(move |last_reset: Option<u32>| {
+        let reset = reset.get();
+        if last_reset != Some(reset)
+            && let Some(canvas) = canvas_ref.get()
+        {
+            let ctx = canvas
+                .get_context("2d")
+                .unwrap()
+                .unwrap()
+                .dyn_into::<web_sys::CanvasRenderingContext2d>()
+                .unwrap();
+            let width = canvas.width() as f64;
+            let height = canvas.height() as f64;
+            ctx.clear_rect(0.0, 0.0, width, height);
+            for action in history.get_untracked() {
+                draw_on_canvas(&action);
+            }
+        }
+        reset
     });
 
     let on_mousedown = move |ev: web_sys::MouseEvent| {

@@ -69,6 +69,7 @@ pub struct RoomState {
     pub show_whiteboard: ReadSignal<bool>,
     pub show_etherpad: ReadSignal<bool>,
     pub whiteboard_history: ReadSignal<Vec<DrawAction>>,
+    pub whiteboard_reset: ReadSignal<u32>,
     pub my_id: ReadSignal<Option<String>>,
     pub typing_users: ReadSignal<HashSet<String>>,
     pub is_host: Signal<bool>,
@@ -247,6 +248,10 @@ pub fn use_room_state() -> RoomState {
     let (show_etherpad, set_show_etherpad) = signal(false);
     let (whiteboard_history, set_whiteboard_history) = signal(Vec::<DrawAction>::new());
     let (_last_draw_action, set_last_draw_action) = signal(None::<DrawAction>);
+    // Bumped whenever the server sends an authoritative whiteboard snapshot
+    // (e.g. after it evicted old strokes). The canvas uses it to force a full
+    // clear-and-repaint, since erased strokes cannot be removed incrementally.
+    let (whiteboard_reset, set_whiteboard_reset) = signal(0u32);
     let (my_id, set_my_id) = signal(None::<String>);
     let (local_stream, set_local_stream) = signal(None::<MediaStream>);
     let (local_screen_stream, set_local_screen_stream) = signal(None::<MediaStream>);
@@ -938,6 +943,7 @@ pub fn use_room_state() -> RoomState {
                                 set_grid_layout_sig,
                                 set_whiteboard_history,
                                 set_last_draw_action,
+                                set_whiteboard_reset,
                                 set_shared_video_url,
                                 last_ping_time,
                                 set_rtt,
@@ -2046,6 +2052,7 @@ pub fn use_room_state() -> RoomState {
         show_whiteboard,
         show_etherpad,
         whiteboard_history,
+        whiteboard_reset,
         my_id,
         typing_users,
         is_host,

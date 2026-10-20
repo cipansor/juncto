@@ -2,11 +2,6 @@ use crate::AppState;
 use shared::{ChatMessage, FileAttachment, ServerMessage};
 use std::sync::Arc;
 
-/// Maximum number of chat messages retained in the in-memory history.
-/// Older messages are evicted so a long-running room cannot grow without
-/// bound (each message may carry a multi-megabyte attachment).
-pub const MAX_CHAT_HISTORY: usize = 500;
-
 /// Maximum length (in Unicode scalar values) of a single chat message body.
 pub const MAX_CHAT_CONTENT_LEN: usize = 4000;
 
@@ -54,7 +49,7 @@ pub fn process_chat_message(
         history.push(chat_msg.clone());
         // Ring-buffer semantics: drop the oldest entries once the cap is
         // reached so memory stays bounded across the room's lifetime.
-        let excess = history.len().saturating_sub(MAX_CHAT_HISTORY);
+        let excess = history.len().saturating_sub(shared::MAX_CHAT_HISTORY);
         if excess > 0 {
             history.drain(0..excess);
         }
@@ -188,17 +183,17 @@ mod tests {
     #[test]
     fn test_chat_history_is_bounded() {
         let state = create_mock_state();
-        for i in 0..(MAX_CHAT_HISTORY + 25) {
+        for i in 0..(shared::MAX_CHAT_HISTORY + 25) {
             let res = process_chat_message("user1", &None, format!("msg {i}"), None, None, &state);
             assert!(res.is_ok());
         }
 
         let history = state.chat_history.lock().unwrap();
-        assert_eq!(history.len(), MAX_CHAT_HISTORY);
+        assert_eq!(history.len(), shared::MAX_CHAT_HISTORY);
         // Oldest messages were evicted, newest retained.
         assert_eq!(
             history.last().unwrap().content,
-            format!("msg {}", MAX_CHAT_HISTORY + 24)
+            format!("msg {}", shared::MAX_CHAT_HISTORY + 24)
         );
         assert_eq!(history.first().unwrap().content, "msg 25");
     }

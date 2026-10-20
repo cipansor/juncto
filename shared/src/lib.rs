@@ -201,6 +201,11 @@ pub struct Poll {
     pub voters: HashSet<String>,
     #[serde(default)]
     pub is_closed: bool,
+    /// Monotonic creation sequence used to evict the oldest poll
+    /// deterministically once `MAX_POLLS` is reached. Assigned by the server;
+    /// `HashMap` iteration order does not track insertion age.
+    #[serde(default)]
+    pub created_seq: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -402,6 +407,9 @@ pub enum ServerMessage {
     PollCreated(Poll),
     PollUpdated(Poll),
     PollsList(Vec<Poll>),
+    /// Poll IDs evicted from server state to stay under the retention cap.
+    /// Connected clients must drop them so their poll list stays in sync.
+    PollRemoved(Vec<String>),
     Draw(DrawAction),
     WhiteboardHistory(Vec<DrawAction>),
     ChatHistory(Vec<ChatMessage>),
@@ -560,6 +568,21 @@ pub fn is_giphy_cdn_url(url: &str) -> bool {
 /// display name. Enforced by the backend on `Join` and `UpdateProfile`, and
 /// mirrored by the client so users get immediate feedback.
 pub const MAX_PARTICIPANT_NAME_LEN: usize = 64;
+
+/// Maximum number of chat messages retained. Enforced by the server on the
+/// authoritative history and mirrored by the client so a long-lived browser
+/// tab cannot accumulate more messages than the server would replay.
+pub const MAX_CHAT_HISTORY: usize = 500;
+
+/// Maximum number of whiteboard strokes retained. Enforced by the server on
+/// the authoritative history and mirrored by the client so a long-lived
+/// browser tab cannot accumulate more strokes than the server would replay.
+pub const MAX_WHITEBOARD_STROKES: usize = 10_000;
+
+/// Maximum number of polls retained. Enforced by the server on the
+/// authoritative map and mirrored by the client so a long-lived browser tab
+/// cannot accumulate more polls than the server holds.
+pub const MAX_POLLS: usize = 200;
 
 /// Returns `true` if `value` is a CSS colour literal that is safe to assign to
 /// a CSS custom property: `#rgb`, `#rrggbb` or `#rrggbbaa` hex.

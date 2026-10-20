@@ -316,6 +316,7 @@ pub fn Room() -> impl IntoView {
                                     <Whiteboard
                                         on_draw=state.send_draw
                                         history=state.whiteboard_history
+                                        reset=state.whiteboard_reset
                                         my_id=state.my_id
                                         is_visitor=state.is_visitor
                                     />

@@ -68,6 +68,9 @@ pub struct HandlerContext {
     pub set_grid_layout_sig: WriteSignal<String>,
     pub set_whiteboard_history: WriteSignal<Vec<DrawAction>>,
     pub set_last_draw_action: WriteSignal<Option<DrawAction>>,
+    /// Bumped to force the whiteboard canvas to clear and repaint from the
+    /// current history (used after the server evicts strokes).
+    pub set_whiteboard_reset: WriteSignal<u32>,
     pub set_shared_video_url: WriteSignal<Option<String>>,
     pub last_ping_time: ReadSignal<f64>,
     pub set_rtt: WriteSignal<u64>,
@@ -317,7 +320,15 @@ pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
         ServerMessage::Chat { message, room_id } => {
             let current_room = ctx.current_room_id.get_untracked();
             if room_id == current_room {
-                ctx.set_messages.update(|msgs| msgs.push(message));
+                ctx.set_messages.update(|msgs| {
+                    msgs.push(message);
+                    // Mirror the server's retention cap so a long-lived tab
+                    // cannot accumulate more messages than the server keeps.
+                    let excess = msgs.len().saturating_sub(shared::MAX_CHAT_HISTORY);
+                    if excess > 0 {
+                        msgs.drain(0..excess);
+                    }
+                });
             }
         }
         ServerMessage::ChatHistory(history) => {
@@ -606,6 +617,19 @@ pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
                 if !list.iter().any(|p| p.id == poll.id) {
                     list.push(poll);
                 }
+                // Mirror the server's poll cap so a long-lived tab cannot
+                // accumulate more polls than the server retains.
+                let excess = list.len().saturating_sub(shared::MAX_POLLS);
+                if excess > 0 {
+                    list.drain(0..excess);
+                }
+            });
+        }
+        ServerMessage::PollRemoved(ids) => {
+            // The server evicted these polls to stay under its cap; drop them
+            // so we do not offer a vote the server would reject.
+            ctx.set_polls.update(|list| {
+                list.retain(|p| !ids.contains(&p.id));
             });
         }
         ServerMessage::PollUpdated(poll) => {
@@ -744,7 +768,12 @@ pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
             ctx.set_whiteboard_history.update(|h| h.push(action));
         }
         ServerMessage::WhiteboardHistory(history) => {
+            // The server sends an authoritative snapshot on join and whenever
+            // it evicts strokes. Replace our history with it and ask the
+            // renderer to clear and repaint, so a long-lived tab stays bounded
+            // and every participant sees the same canvas.
             ctx.set_whiteboard_history.set(history);
+            ctx.set_whiteboard_reset.update(|n| *n = n.wrapping_add(1));
         }
         ServerMessage::VideoShared(url) => {
             ctx.set_shared_video_url.set(Some(url));

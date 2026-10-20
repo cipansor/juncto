@@ -138,6 +138,7 @@ fn test_poll_serialization() {
         ],
         voters: std::collections::HashSet::new(),
         is_closed: false,
+        created_seq: 0,
     };
     let msg = ClientMessage::CreatePoll(poll.clone());
     let json = serde_json::to_string(&msg).unwrap();

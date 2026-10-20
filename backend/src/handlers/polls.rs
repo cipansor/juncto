@@ -2,15 +2,19 @@ use crate::AppState;
 use shared::{Poll, ServerMessage};
 use std::sync::Arc;
 
-/// Maximum number of polls retained in the in-memory room state. Older polls
-/// are evicted so the host cannot grow server memory without bound.
-pub const MAX_POLLS: usize = 200;
+/// Result of a poll mutation: the message to broadcast plus any polls that were
+/// evicted to stay under `shared::MAX_POLLS`, so connected clients can drop them too.
+#[derive(Debug)]
+pub struct PollOutcome {
+    pub message: ServerMessage,
+    pub removed: Vec<String>,
+}
 
 pub fn create_poll(
     user_id: &str,
     mut poll: Poll,
     state: &Arc<AppState>,
-) -> Result<ServerMessage, String> {
+) -> Result<PollOutcome, String> {
     let is_host = {
         let config = state.room_config.lock().unwrap();
         config.host_id.as_deref() == Some(user_id)
@@ -24,21 +28,36 @@ pub fn create_poll(
         poll.id = uuid::Uuid::new_v4().to_string();
     }
 
+    let mut removed = Vec::new();
     {
         let mut polls = state.polls.lock().unwrap();
-        polls.insert(poll.id.clone(), poll.clone());
-        // Evict the oldest poll(s) once the cap is reached. HashMap iteration
-        // order is unspecified, so we simply remove arbitrary entries down to
-        // the limit; correctness does not depend on which poll is dropped.
-        while polls.len() > MAX_POLLS {
-            let Some(oldest) = polls.keys().next().cloned() else {
+        // Evict the oldest poll(s) *before* inserting, choosing by the
+        // monotonic `created_seq` rather than `HashMap` iteration order, so a
+        // freshly created poll can never evict itself.
+        while polls.len() >= shared::MAX_POLLS {
+            let Some(oldest) = polls
+                .values()
+                .min_by_key(|p| p.created_seq)
+                .map(|p| p.id.clone())
+            else {
                 break;
             };
             polls.remove(&oldest);
+            removed.push(oldest);
         }
+        poll.created_seq = polls
+            .values()
+            .map(|p| p.created_seq)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        polls.insert(poll.id.clone(), poll.clone());
     }
 
-    Ok(ServerMessage::PollCreated(poll))
+    Ok(PollOutcome {
+        message: ServerMessage::PollCreated(poll),
+        removed,
+    })
 }
 
 pub fn vote(
@@ -149,11 +168,14 @@ mod tests {
             options: vec![],
             voters: std::collections::HashSet::new(),
             is_closed: false,
+            created_seq: 0,
         };
 
         let res = create_poll(user_id, poll, &state);
         assert!(res.is_ok());
-        if let Ok(ServerMessage::PollCreated(p)) = res {
+        let outcome = res.unwrap();
+        assert!(outcome.removed.is_empty());
+        if let ServerMessage::PollCreated(p) = outcome.message {
             assert!(!p.id.is_empty());
             assert_eq!(p.question, "Test?");
         } else {
@@ -170,18 +192,56 @@ mod tests {
             config.host_id = Some(user_id.to_string());
         }
 
-        for i in 0..(MAX_POLLS + 5) {
+        for i in 0..(shared::MAX_POLLS + 5) {
             let poll = Poll {
                 id: format!("poll-{i}"),
                 question: format!("Q{i}"),
                 options: vec![],
                 voters: std::collections::HashSet::new(),
                 is_closed: false,
+                created_seq: 0,
             };
             assert!(create_poll(user_id, poll, &state).is_ok());
         }
 
-        assert_eq!(state.polls.lock().unwrap().len(), MAX_POLLS);
+        assert_eq!(state.polls.lock().unwrap().len(), shared::MAX_POLLS);
+    }
+
+    #[test]
+    fn test_new_poll_survives_eviction_and_evicted_ids_are_reported() {
+        let state = create_mock_state();
+        let user_id = "host";
+        {
+            let mut config = state.room_config.lock().unwrap();
+            config.host_id = Some(user_id.to_string());
+        }
+
+        // Fill to the cap.
+        for i in 0..shared::MAX_POLLS {
+            let poll = Poll {
+                id: format!("poll-{i}"),
+                question: format!("Q{i}"),
+                options: vec![],
+                voters: std::collections::HashSet::new(),
+                is_closed: false,
+                created_seq: 0,
+            };
+            assert!(create_poll(user_id, poll, &state).is_ok());
+        }
+
+        // The next poll must evict exactly the oldest and survive itself.
+        let poll = Poll {
+            id: "newest".to_string(),
+            question: "Newest?".to_string(),
+            options: vec![],
+            voters: std::collections::HashSet::new(),
+            is_closed: false,
+            created_seq: 0,
+        };
+        let outcome = create_poll(user_id, poll, &state).unwrap();
+        assert_eq!(outcome.removed, vec!["poll-0".to_string()]);
+        assert!(state.polls.lock().unwrap().contains_key("newest"));
+        assert!(!state.polls.lock().unwrap().contains_key("poll-0"));
     }
 
     #[test]
@@ -196,6 +256,7 @@ mod tests {
             options: vec![],
             voters: std::collections::HashSet::new(),
             is_closed: false,
+            created_seq: 0,
         };
 
         let res = create_poll(user_id, poll, &state);
@@ -230,6 +291,7 @@ mod tests {
                     ],
                     voters: std::collections::HashSet::new(),
                     is_closed: false,
+                    created_seq: 0,
                 },
             );
         }
@@ -268,6 +330,7 @@ mod tests {
                     }],
                     voters: std::collections::HashSet::new(),
                     is_closed: true,
+                    created_seq: 0,
                 },
             );
         }

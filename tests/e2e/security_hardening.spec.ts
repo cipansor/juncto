@@ -40,4 +40,37 @@ test.describe('Security hardening', () => {
         const response = await request.post('/api/rooms', { data: body });
         expect(response.status()).toBe(201);
     });
+
+    test('POST /api/rooms accepts a case-insensitive bearer scheme', async ({ playwright }) => {
+        // RFC 7235 scheme names are case-insensitive; "bearer" must work.
+        const lower = await playwright.request.newContext({
+            baseURL: 'http://localhost:3000',
+            extraHTTPHeaders: { Authorization: 'bearer ' + process.env.E2E_ADMIN_TOKEN },
+        });
+        try {
+            const response = await lower.post('/api/rooms', { data: body });
+            expect(response.status()).toBe(201);
+        } finally {
+            await lower.dispose();
+        }
+    });
+
+    test('POST /api/rooms rejects invalid branding', async ({ request }) => {
+        const response = await request.post('/api/rooms', {
+            data: {
+                ...body,
+                branding: { primary_color: 'url(https://evil.example/x)' },
+            },
+        });
+        expect(response.status()).toBe(400);
+    });
+
+    test('display name input enforces the 64-character limit', async ({ page }) => {
+        await page.goto('/room/e2e-test-room');
+        const input = page.locator('#display-name');
+        await expect(input).toBeVisible();
+        await expect(input).toHaveAttribute('maxlength', '64');
+        await input.fill('x'.repeat(100));
+        await expect(input).toHaveValue('x'.repeat(64));
+    });
 });

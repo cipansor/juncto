@@ -19,6 +19,14 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+/// Extracts the token from an `Authorization` header value. The scheme name is
+/// case-insensitive per RFC 7235, so `bearer`, `Bearer` and `BEARER` are all
+/// accepted; a missing or differently-schemed header yields `None`.
+fn bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("bearer").then_some(token)
+}
+
 pub async fn create_room(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -32,13 +40,35 @@ pub async fn create_room(
         Some(expected) => headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
+            .and_then(bearer_token)
             .is_some_and(|provided| constant_time_eq(provided, expected)),
         None => false,
     };
     if !authorized {
         let err = json!({ "error": "Unauthorized" });
         return (StatusCode::UNAUTHORIZED, Json(err)).into_response();
+    }
+
+    // Branding is applied to every joining participant's stylesheet and logo
+    // `<img>`, so enforce the same rules as the WebSocket `SetBranding` path.
+    // Without this a token-holder could bypass the CSS/URL validation there.
+    if let Some(ref color) = payload.branding.primary_color
+        && !shared::is_valid_css_hex_color(color)
+    {
+        let err = json!({ "error": "Invalid primary color: expected a hex value like #RRGGBB" });
+        return (StatusCode::BAD_REQUEST, Json(err)).into_response();
+    }
+    if let Some(ref color) = payload.branding.background_color
+        && !shared::is_valid_css_hex_color(color)
+    {
+        let err = json!({ "error": "Invalid background color: expected a hex value like #RRGGBB" });
+        return (StatusCode::BAD_REQUEST, Json(err)).into_response();
+    }
+    if let Some(ref logo) = payload.branding.logo_url
+        && !shared::is_valid_logo_url(logo)
+    {
+        let err = json!({ "error": "Invalid logo URL: must start with https://" });
+        return (StatusCode::BAD_REQUEST, Json(err)).into_response();
     }
 
     // Mirror the validation enforced by the WebSocket `SetSubject` handler
@@ -267,5 +297,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_create_room_accepts_lowercase_bearer_scheme() {
+        let state = build_state(Some("secret".to_string()));
+        let builder = Request::builder()
+            .uri("/api/rooms")
+            .method("POST")
+            .header("Content-Type", "application/json")
+            .header("Authorization", "bearer secret");
+        let req = builder
+            .body(Body::from(serde_json::to_string(&valid_body()).unwrap()))
+            .unwrap();
+        let response = app(state).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_create_room_rejects_invalid_branding_colors() {
+        for field in ["primary_color", "background_color"] {
+            let state = build_state(Some("secret".to_string()));
+            let mut body = valid_body();
+            body["branding"][field] = serde_json::json!("url(https://evil.example/x)");
+            let response = app(state)
+                .oneshot(request(body, Some("secret")))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "field {field}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_room_rejects_non_https_logo() {
+        let state = build_state(Some("secret".to_string()));
+        let mut body = valid_body();
+        body["branding"]["logo_url"] = serde_json::json!("http://evil.example/logo.png");
+        let response = app(state)
+            .oneshot(request(body, Some("secret")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_create_room_accepts_valid_branding() {
+        let state = build_state(Some("secret".to_string()));
+        let mut body = valid_body();
+        body["branding"]["primary_color"] = serde_json::json!("#ff8800");
+        body["branding"]["background_color"] = serde_json::json!("#0a0b0c");
+        body["branding"]["logo_url"] = serde_json::json!("https://example.com/logo.png");
+        let response = app(state)
+            .oneshot(request(body, Some("secret")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
     }
 }

@@ -1313,7 +1313,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             continue;
                                         }
                                         match polls::create_poll(uid, poll, &state) {
-                                            Ok(msg) => { let _ = tx.send(msg); },
+                                            Ok(outcome) => {
+                                                // Tell clients about evicted polls before the
+                                                // new one so their list stays consistent.
+                                                if !outcome.removed.is_empty() {
+                                                    let _ = tx.send(ServerMessage::PollRemoved(outcome.removed));
+                                                }
+                                                let _ = tx.send(outcome.message);
+                                            },
                                             Err(e) => { let _ = internal_tx.send(ServerMessage::Error(e)).await; }
                                         }
                                     }
@@ -1350,8 +1357,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             let _ = internal_tx.send(ServerMessage::Error("Visitors cannot draw on the whiteboard".to_string())).await;
                                             continue;
                                         }
-                                        let msg = whiteboard::process_draw_action(uid, action, &state);
-                                        let _ = tx.send(msg);
+                                        let outcome = whiteboard::process_draw_action(uid, action, &state);
+                                        let _ = tx.send(outcome.message);
+                                        if outcome.evicted {
+                                            // Strokes were dropped from server history;
+                                            // resend the retained set so every client
+                                            // (including the drawer) clears the erased
+                                            // strokes and stays in sync.
+                                            let snapshot: Vec<shared::DrawAction> = {
+                                                let wb = state.whiteboard.lock().unwrap();
+                                                wb.clone()
+                                            };
+                                            let _ = tx.send(ServerMessage::WhiteboardHistory(snapshot));
+                                        }
                                     }
                                 },
                                 ClientMessage::Reaction(emoji) => {
