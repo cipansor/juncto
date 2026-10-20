@@ -1357,18 +1357,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             let _ = internal_tx.send(ServerMessage::Error("Visitors cannot draw on the whiteboard".to_string())).await;
                                             continue;
                                         }
-                                        let outcome = whiteboard::process_draw_action(uid, action, &state);
-                                        let _ = tx.send(outcome.message);
-                                        if outcome.evicted {
-                                            // Strokes were dropped from server history;
-                                            // resend the retained set so every client
-                                            // (including the drawer) clears the erased
-                                            // strokes and stays in sync.
-                                            let snapshot: Vec<shared::DrawAction> = {
-                                                let wb = state.whiteboard.lock().unwrap();
-                                                wb.clone()
-                                            };
-                                            let _ = tx.send(ServerMessage::WhiteboardHistory(snapshot));
+                                        for message in whiteboard::draw_broadcast(uid, action, &state) {
+                                            let _ = tx.send(message);
                                         }
                                     }
                                 },

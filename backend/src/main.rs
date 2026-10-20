@@ -45,6 +45,10 @@ pub struct AppState {
     pub camera_permissions: Arc<Mutex<HashSet<String>>>,
     /// Rate limiting for feedback: tracks timestamps of submissions per user/IP
     pub feedback_timestamps: Arc<Mutex<HashMap<String, Vec<std::time::Instant>>>>,
+    /// Monotonic sequence source for poll creation order. A process-wide counter
+    /// (rather than the max of the retained polls) so `created_seq` stays unique
+    /// even across replacements and evictions.
+    pub poll_seq: Arc<std::sync::atomic::AtomicU64>,
     /// Shared secret required to reset the global room via `POST /api/rooms`.
     /// Read from `ROOM_ADMIN_TOKEN`; when unset the endpoint is disabled, so a
     /// self-hosted deployment is not trivially disrupted by any anonymous
@@ -81,6 +85,7 @@ async fn main() {
     let unmute_permissions = Arc::new(Mutex::new(HashSet::new()));
     let camera_permissions = Arc::new(Mutex::new(HashSet::new()));
     let feedback_timestamps = Arc::new(Mutex::new(HashMap::new()));
+    let poll_seq = Arc::new(std::sync::atomic::AtomicU64::new(1));
     // Optional shared secret for the room-reset endpoint. Absent (the default)
     // means the endpoint stays disabled rather than open.
     let admin_token = std::env::var("ROOM_ADMIN_TOKEN")
@@ -105,6 +110,7 @@ async fn main() {
         unmute_permissions,
         camera_permissions,
         feedback_timestamps,
+        poll_seq,
         admin_token,
     });
 

@@ -399,6 +399,14 @@ fn test_draw_serialization() {
 }
 
 #[test]
+fn test_whiteboard_evicted_serialization() {
+    let msg = ServerMessage::WhiteboardEvicted { count: 3 };
+    let json = serde_json::to_string(&msg).unwrap();
+    let deserialized: ServerMessage = serde_json::from_str(&json).unwrap();
+    assert_eq!(msg, deserialized);
+}
+
+#[test]
 fn test_is_valid_css_hex_color_accepts_hex_literals() {
     for valid in ["#fff", "#FFF", "#ffffff", "#0a1B2c", "#11223344"] {
         assert!(is_valid_css_hex_color(valid), "{valid} should be valid");

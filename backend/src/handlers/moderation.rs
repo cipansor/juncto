@@ -271,6 +271,7 @@ mod tests {
             unmute_permissions: Arc::new(Mutex::new(std::collections::HashSet::new())),
             camera_permissions: Arc::new(Mutex::new(std::collections::HashSet::new())),
             feedback_timestamps: Arc::new(Mutex::new(HashMap::new())),
+            poll_seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             admin_token: None,
         })
     }

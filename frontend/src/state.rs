@@ -70,6 +70,10 @@ pub struct RoomState {
     pub show_etherpad: ReadSignal<bool>,
     pub whiteboard_history: ReadSignal<Vec<DrawAction>>,
     pub whiteboard_reset: ReadSignal<u32>,
+    /// Monotonic count of strokes appended via `Draw`. The canvas uses it to
+    /// paint only the newly appended tail, which keeps incremental drawing
+    /// correct even though evictions trim the front of the history.
+    pub whiteboard_append: ReadSignal<u32>,
     pub my_id: ReadSignal<Option<String>>,
     pub typing_users: ReadSignal<HashSet<String>>,
     pub is_host: Signal<bool>,
@@ -248,10 +252,17 @@ pub fn use_room_state() -> RoomState {
     let (show_etherpad, set_show_etherpad) = signal(false);
     let (whiteboard_history, set_whiteboard_history) = signal(Vec::<DrawAction>::new());
     let (_last_draw_action, set_last_draw_action) = signal(None::<DrawAction>);
-    // Bumped whenever the server sends an authoritative whiteboard snapshot
-    // (e.g. after it evicted old strokes). The canvas uses it to force a full
-    // clear-and-repaint, since erased strokes cannot be removed incrementally.
+    // Bumped when the canvas must clear and repaint from the retained history:
+    // on the join snapshot, and (throttled) after the server evicts strokes.
     let (whiteboard_reset, set_whiteboard_reset) = signal(0u32);
+    // Monotonic count of strokes appended via `Draw`; lets the canvas paint only
+    // the new tail even though evictions trim the front of the history.
+    let (whiteboard_append, set_whiteboard_append) = signal(0u32);
+    // Throttle state for eviction-driven canvas rebuilds (see state_handlers).
+    let whiteboard_repaint_at: SendWrapper<Rc<RefCell<f64>>> =
+        SendWrapper::new(Rc::new(RefCell::new(0.0)));
+    let whiteboard_repaint_timer: SendWrapper<Rc<RefCell<Option<gloo_timers::callback::Timeout>>>> =
+        SendWrapper::new(Rc::new(RefCell::new(None)));
     let (my_id, set_my_id) = signal(None::<String>);
     let (local_stream, set_local_stream) = signal(None::<MediaStream>);
     let (local_screen_stream, set_local_screen_stream) = signal(None::<MediaStream>);
@@ -864,12 +875,16 @@ pub fn use_room_state() -> RoomState {
         let recording_stream_id_for_cleanup = recording_stream_id.clone();
         let webrtc_manager_for_ws = webrtc_manager.clone();
         let remote_control = remote_control.clone();
+        let whiteboard_repaint_at_for_ws = whiteboard_repaint_at.clone();
+        let whiteboard_repaint_timer_for_ws = whiteboard_repaint_timer.clone();
         move |_| {
             let analytics = analytics_for_ws.clone();
             let remote_control_for_effect = remote_control.clone();
             let local_recorder_for_cleanup = local_recorder_for_cleanup.clone();
             let pending_recorders_for_cleanup = pending_recorders_for_cleanup.clone();
             let recording_stream_id_for_cleanup = recording_stream_id_for_cleanup.clone();
+            let whiteboard_repaint_at = whiteboard_repaint_at_for_ws.clone();
+            let whiteboard_repaint_timer = whiteboard_repaint_timer_for_ws.clone();
             set_my_id.set(None);
             set_room_config.set(shared::RoomConfig::default());
 
@@ -944,6 +959,9 @@ pub fn use_room_state() -> RoomState {
                                 set_whiteboard_history,
                                 set_last_draw_action,
                                 set_whiteboard_reset,
+                                set_whiteboard_append,
+                                whiteboard_repaint_at: whiteboard_repaint_at.clone(),
+                                whiteboard_repaint_timer: whiteboard_repaint_timer.clone(),
                                 set_shared_video_url,
                                 last_ping_time,
                                 set_rtt,
@@ -2053,6 +2071,7 @@ pub fn use_room_state() -> RoomState {
         show_etherpad,
         whiteboard_history,
         whiteboard_reset,
+        whiteboard_append,
         my_id,
         typing_users,
         is_host,

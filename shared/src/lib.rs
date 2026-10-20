@@ -411,6 +411,15 @@ pub enum ServerMessage {
     /// Connected clients must drop them so their poll list stays in sync.
     PollRemoved(Vec<String>),
     Draw(DrawAction),
+    /// Number of oldest strokes the server dropped from its retained history
+    /// to stay under `MAX_WHITEBOARD_STROKES`. Clients trim the same count from
+    /// the front of their history and repaint at a bounded cadence, instead of
+    /// receiving (and repainting) the full history on every draw past the cap.
+    WhiteboardEvicted {
+        count: u32,
+    },
+    /// Full authoritative snapshot of the retained strokes. Sent on join
+    /// rather than on every eviction, so steady-state drawing stays incremental.
     WhiteboardHistory(Vec<DrawAction>),
     ChatHistory(Vec<ChatMessage>),
     Welcome {

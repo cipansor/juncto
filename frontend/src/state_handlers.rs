@@ -69,8 +69,15 @@ pub struct HandlerContext {
     pub set_whiteboard_history: WriteSignal<Vec<DrawAction>>,
     pub set_last_draw_action: WriteSignal<Option<DrawAction>>,
     /// Bumped to force the whiteboard canvas to clear and repaint from the
-    /// current history (used after the server evicts strokes).
+    /// current history (join snapshot, and throttled after server evictions).
     pub set_whiteboard_reset: WriteSignal<u32>,
+    /// Bumped on every `Draw` so the canvas can paint just the appended tail.
+    pub set_whiteboard_append: WriteSignal<u32>,
+    /// Wall-clock ms of the last eviction-driven repaint, used to throttle full
+    /// canvas rebuilds when the server evicts strokes.
+    pub whiteboard_repaint_at: SendWrapper<Rc<RefCell<f64>>>,
+    /// Pending trailing repaint so the final post-eviction canvas is authoritative.
+    pub whiteboard_repaint_timer: SendWrapper<Rc<RefCell<Option<gloo_timers::callback::Timeout>>>>,
     pub set_shared_video_url: WriteSignal<Option<String>>,
     pub last_ping_time: ReadSignal<f64>,
     pub set_rtt: WriteSignal<u64>,
@@ -91,6 +98,38 @@ pub struct HandlerContext {
     pub set_has_unmute_permission: WriteSignal<bool>,
     pub set_has_camera_permission: WriteSignal<bool>,
     pub remote_control: RemoteControlService,
+}
+
+/// Minimum interval between eviction-driven full canvas rebuilds. Continuous
+/// drawing past the stroke cap emits an eviction per stroke; rebuilding the
+/// whole canvas on each would be the same quadratic work the snapshot-per-draw
+/// approach caused, just moved to the client.
+const WHITEBOARD_REPAINT_INTERVAL_MS: f64 = 1000.0;
+
+/// Rebuild the canvas at most once per `WHITEBOARD_REPAINT_INTERVAL_MS`, with a
+/// trailing repaint so the final state after a burst of evictions is correct.
+fn request_whiteboard_repaint(ctx: &HandlerContext) {
+    let now = js_sys::Date::now();
+    let elapsed = now - *ctx.whiteboard_repaint_at.borrow();
+    if elapsed >= WHITEBOARD_REPAINT_INTERVAL_MS {
+        *ctx.whiteboard_repaint_at.borrow_mut() = now;
+        ctx.set_whiteboard_reset.update(|n| *n = n.wrapping_add(1));
+        return;
+    }
+
+    if ctx.whiteboard_repaint_timer.borrow().is_some() {
+        return;
+    }
+    let delay = (WHITEBOARD_REPAINT_INTERVAL_MS - elapsed).max(0.0) as u32;
+    let reset = ctx.set_whiteboard_reset;
+    let at = ctx.whiteboard_repaint_at.clone();
+    let timer_slot = ctx.whiteboard_repaint_timer.clone();
+    let handle = gloo_timers::callback::Timeout::new(delay, move || {
+        *at.borrow_mut() = js_sys::Date::now();
+        reset.update(|n| *n = n.wrapping_add(1));
+        timer_slot.borrow_mut().take();
+    });
+    *ctx.whiteboard_repaint_timer.borrow_mut() = Some(handle);
 }
 
 pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
@@ -766,12 +805,26 @@ pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
         ServerMessage::Draw(action) => {
             ctx.set_last_draw_action.set(Some(action.clone()));
             ctx.set_whiteboard_history.update(|h| h.push(action));
+            // Separate monotonic counter: the canvas paints only the appended
+            // tail from it, since evictions trim the front of the history (so a
+            // length-based diff would stop detecting new strokes at the cap).
+            ctx.set_whiteboard_append.update(|n| *n = n.wrapping_add(1));
+        }
+        ServerMessage::WhiteboardEvicted { count } => {
+            // The server dropped the oldest strokes. Trim the same prefix so our
+            // retained history matches, then schedule a canvas rebuild — but at
+            // a bounded cadence, so continuous drawing past the cap does not
+            // repaint the whole canvas (or receive the whole history) per stroke.
+            ctx.set_whiteboard_history.update(|h| {
+                let n = (count as usize).min(h.len());
+                h.drain(0..n);
+            });
+            request_whiteboard_repaint(ctx);
         }
         ServerMessage::WhiteboardHistory(history) => {
-            // The server sends an authoritative snapshot on join and whenever
-            // it evicts strokes. Replace our history with it and ask the
-            // renderer to clear and repaint, so a long-lived tab stays bounded
-            // and every participant sees the same canvas.
+            // Authoritative snapshot on join. Replace our history and force a
+            // full clear-and-repaint so a long-lived tab is bounded and every
+            // participant sees the same canvas.
             ctx.set_whiteboard_history.set(history);
             ctx.set_whiteboard_reset.update(|n| *n = n.wrapping_add(1));
         }
