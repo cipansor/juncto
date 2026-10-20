@@ -57,11 +57,21 @@ fn lag_resync_messages(state: &Arc<AppState>, room_id: Option<String>) -> Vec<Se
     msgs.push(ServerMessage::ParticipantList(participants));
 
     if room_id.is_none() {
+        // Sent even when empty: the snapshot is authoritative for retained
+        // main-room public chat, so an empty one must clear public messages a
+        // client still holds from a previous room (e.g. after a reset). The
+        // client preserves its own private messages, which the server never
+        // retains and therefore never includes here.
         let history = state.chat_history.lock().unwrap().clone();
-        if !history.is_empty() {
-            msgs.push(ServerMessage::ChatHistory(history));
-        }
+        msgs.push(ServerMessage::ChatHistory(history));
     }
+
+    // The client derives host status, lock state and moderation controls from
+    // the room config, so a dropped `RoomUpdated` (e.g. a host transfer) must be
+    // repaired too — none of the other snapshots carry it.
+    msgs.push(ServerMessage::RoomUpdated(
+        state.room_config.lock().unwrap().clone(),
+    ));
 
     let polls: Vec<Poll> = state.polls.lock().unwrap().values().cloned().collect();
     msgs.push(ServerMessage::PollsList(polls));
@@ -1226,8 +1236,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                     // (a missed `Draw`/`PollRemoved` carries no
                                                     // way to reconstruct it), so re-send the
                                                     // retained state for this socket's room and
-                                                    // let the client replace its view. This
-                                                    // cannot loop unboundedly: sending awaits
+                                                    // let the client replace its view. A room
+                                                    // reset now broadcasts matching clear events,
+                                                    // so a stale pre-reset event still queued in
+                                                    // the buffer cannot resurrect cleared state.
+                                                    // This cannot loop unboundedly: sending awaits
                                                     // `forward_tx`, so a socket that is not
                                                     // draining blocks here instead of hitting
                                                     // `Lagged` again.
@@ -2224,7 +2237,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             // Missed an unknown set of broadcasts. Re-send the
                                             // retained state for this socket's room so the
                                             // client can replace its view; incremental
-                                            // messages cannot repair the gap.
+                                            // messages cannot repair the gap. A room reset
+                                            // broadcasts matching clear events, so a stale
+                                            // pre-reset event still queued in the buffer
+                                            // cannot resurrect cleared state.
                                             let my_room = {
                                                 let locs = locations_clone.lock().unwrap();
                                                 locs.get(&my_id_clone).cloned().flatten()
@@ -2544,6 +2560,7 @@ mod tests {
             .lock()
             .unwrap()
             .push(shared::ChatMessage {
+                id: String::new(),
                 user_id: "u".into(),
                 content: "hi".into(),
                 recipient_id: None,
@@ -2601,6 +2618,33 @@ mod tests {
         assert!(
             msgs.iter()
                 .any(|m| matches!(m, ServerMessage::VideoShared(u) if u == "https://v"))
+        );
+    }
+
+    #[test]
+    fn lag_resync_sends_empty_chat_history_to_clear_stale_public_chat() {
+        // After a room reset the server history is empty; the resync must still
+        // send a (empty) `ChatHistory` so the client drops public messages it
+        // still holds from the previous room.
+        let state = create_mock_state();
+        let msgs = lag_resync_messages(&state, None);
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::ChatHistory(h) if h.is_empty())),
+            "an empty room must still yield an empty ChatHistory snapshot"
+        );
+    }
+
+    #[test]
+    fn lag_resync_includes_room_config() {
+        // A dropped `RoomUpdated` (e.g. a host transfer) must be repaired, since
+        // no other snapshot carries the config the client derives host state from.
+        let state = create_mock_state();
+        let msgs = lag_resync_messages(&state, None);
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::RoomUpdated(_))),
+            "resync must carry the current room config"
         );
     }
 }

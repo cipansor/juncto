@@ -140,6 +140,13 @@ pub struct DrawAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatMessage {
+    /// Server-assigned unique identifier. Deduplication (a `Chat` replayed from
+    /// the broadcast buffer after a `ChatHistory` resync) keys off this rather
+    /// than `(user_id, timestamp, content)`, which collides for two identical
+    /// messages sent in the same millisecond or for file-only messages with
+    /// empty content. Empty for messages from older servers.
+    #[serde(default)]
+    pub id: String,
     pub user_id: String,
     pub content: String,
     pub recipient_id: Option<String>,
@@ -148,6 +155,23 @@ pub struct ChatMessage {
     pub attachment: Option<FileAttachment>,
     #[serde(default)]
     pub room_id: Option<String>,
+}
+
+/// Whether two messages are the same logical message, for de-duplicating a
+/// `Chat` replayed from the broadcast buffer against a `ChatHistory` snapshot.
+/// Uses the server-assigned `id` when both carry one; falls back to the full
+/// field tuple for legacy messages so two distinct same-millisecond messages,
+/// or file-only messages with empty content, are not collapsed into one.
+pub fn is_same_chat(a: &ChatMessage, b: &ChatMessage) -> bool {
+    if !a.id.is_empty() && !b.id.is_empty() {
+        return a.id == b.id;
+    }
+    a.user_id == b.user_id
+        && a.timestamp == b.timestamp
+        && a.content == b.content
+        && a.recipient_id == b.recipient_id
+        && a.room_id == b.room_id
+        && a.attachment == b.attachment
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, Eq, Hash)]

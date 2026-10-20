@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde_json::json;
-use shared::RoomConfig;
+use shared::{RoomConfig, ServerMessage};
 use std::sync::Arc;
 
 /// Constant-time comparison so the admin-token check does not leak the token
@@ -155,6 +155,21 @@ pub async fn create_room(
     }
 
     let room_id = format!("room-{}", uuid::Uuid::new_v4());
+
+    // Tell connected clients their state was cleared. Without this, a socket
+    // that is lagging when the reset happens can replay a stale pre-reset event
+    // from its broadcast tail (a `VideoShared`, `PollCreated`, ...) *after* the
+    // lag resync, resurrecting state the reset removed. Broadcasting the clears
+    // puts a newer, authoritative event in the tail that supersedes them.
+    // `tx.send` errors only when there are no receivers, which is expected and
+    // fine for a reset with nobody connected.
+    let _ = state.tx.send(ServerMessage::RoomUpdated(payload.clone()));
+    let _ = state.tx.send(ServerMessage::ParticipantList(Vec::new()));
+    let _ = state.tx.send(ServerMessage::ChatHistory(Vec::new()));
+    let _ = state.tx.send(ServerMessage::PollsList(Vec::new()));
+    let _ = state.tx.send(ServerMessage::BreakoutRoomsList(Vec::new()));
+    let _ = state.tx.send(ServerMessage::WhiteboardHistory(Vec::new()));
+    let _ = state.tx.send(ServerMessage::VideoStopped);
 
     let response = json!({
         "room_id": room_id,
@@ -343,16 +358,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_room_accepts_valid_branding() {
+    async fn test_create_room_broadcasts_clear_events() {
+        // A reset must broadcast authoritative clears so a lagging client that
+        // replays a stale pre-reset event cannot resurrect cleared state.
         let state = build_state(Some("secret".to_string()));
-        let mut body = valid_body();
-        body["branding"]["primary_color"] = serde_json::json!("#ff8800");
-        body["branding"]["background_color"] = serde_json::json!("#0a0b0c");
-        body["branding"]["logo_url"] = serde_json::json!("https://example.com/logo.png");
+        let mut rx = state.tx.subscribe();
         let response = app(state)
-            .oneshot(request(body, Some("secret")))
+            .oneshot(request(valid_body(), Some("secret")))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
+
+        let mut got = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            got.push(msg);
+        }
+        assert!(
+            got.iter()
+                .any(|m| matches!(m, ServerMessage::RoomUpdated(_))),
+            "reset must broadcast the new room config"
+        );
+        assert!(
+            got.iter()
+                .any(|m| matches!(m, ServerMessage::ParticipantList(p) if p.is_empty())),
+            "reset must broadcast an empty participant list"
+        );
+        assert!(
+            got.iter()
+                .any(|m| matches!(m, ServerMessage::ChatHistory(h) if h.is_empty())),
+            "reset must clear chat history"
+        );
+        assert!(
+            got.iter().any(|m| matches!(m, ServerMessage::VideoStopped)),
+            "reset must stop shared video"
+        );
     }
 }

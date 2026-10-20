@@ -35,6 +35,7 @@ pub fn process_chat_message(
     }
 
     let chat_msg = ChatMessage {
+        id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         content,
         recipient_id: recipient_id.clone(),

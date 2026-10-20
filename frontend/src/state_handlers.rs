@@ -366,12 +366,10 @@ pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
                     // Ignore a message we already hold. After a lag resync the
                     // broadcast buffer can replay a `Chat` that was already
                     // folded into the `ChatHistory` snapshot, and `Chat` appends
-                    // (unlike the id-merged snapshots), so dedupe by content.
-                    if msgs.iter().any(|m| {
-                        m.timestamp == message.timestamp
-                            && m.user_id == message.user_id
-                            && m.content == message.content
-                    }) {
+                    // (unlike the id-merged snapshots), so dedupe by identity.
+                    // This keys off the server-assigned id, so two identical
+                    // messages sent in the same millisecond are both kept.
+                    if msgs.iter().any(|m| shared::is_same_chat(m, &message)) {
                         return;
                     }
                     msgs.push(message);
@@ -387,18 +385,16 @@ pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
         ServerMessage::ChatHistory(history) => {
             if ctx.current_room_id.get_untracked().is_none() {
                 ctx.set_messages.update(|msgs| {
-                    // Merge the authoritative snapshot with anything already
-                    // held. `ChatHistory` only carries retained main-room public
-                    // messages, so a plain replace would drop private messages
-                    // (never retained server-side); merging also de-duplicates a
-                    // message replayed from the buffer after a lag resync.
+                    // The snapshot is authoritative for retained main-room
+                    // public chat, so replace it: a plain merge would resurrect
+                    // public messages from a previous room after a reset. Only
+                    // local *private* messages are preserved (the server never
+                    // retains them, so they are absent from the snapshot).
                     let mut merged = history;
                     for m in msgs.iter() {
-                        if !merged.iter().any(|x| {
-                            x.timestamp == m.timestamp
-                                && x.user_id == m.user_id
-                                && x.content == m.content
-                        }) {
+                        if m.recipient_id.is_some()
+                            && !merged.iter().any(|x| shared::is_same_chat(x, m))
+                        {
                             merged.push(m.clone());
                         }
                     }
