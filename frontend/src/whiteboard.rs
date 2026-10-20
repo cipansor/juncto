@@ -8,6 +8,8 @@ use wasm_bindgen::JsCast;
 pub fn Whiteboard(
     on_draw: Callback<DrawAction>,
     history: ReadSignal<Vec<DrawAction>>,
+    reset: ReadSignal<u32>,
+    append: ReadSignal<u32>,
     my_id: ReadSignal<Option<String>>,
     is_visitor: Signal<bool>,
 ) -> impl IntoView {
@@ -36,26 +38,58 @@ pub fn Whiteboard(
         }
     };
 
-    // React to history (both initial load and updates)
-    Effect::new(move |last_len: Option<usize>| {
-        let actions = history.get();
-        let len = actions.len();
-        let start = last_len.unwrap_or(0);
-        let is_initial_load = last_len.is_none();
-
-        for i in start..len {
-            if let Some(action) = actions.get(i) {
-                // Filter local echo only for live updates, not initial load
-                if !is_initial_load
-                    && let Some(id) = my_id.get()
-                    && action.sender_id == id
-                {
-                    continue;
-                }
-                draw_on_canvas(action);
+    // Paint strokes on the canvas. Three paths share this effect:
+    //  * first run (panel opened late): paint everything already retained.
+    //  * `reset` bumped (join snapshot / throttled post-eviction rebuild): clear
+    //    and repaint everything retained.
+    //  * `append` bumped (a `Draw` arrived): paint just the appended tail.
+    // A length-based diff cannot be used any more because evictions trim the
+    // front of the history, so the length stays pinned at the cap.
+    let paint_all = move || {
+        if let Some(canvas) = canvas_ref.get() {
+            let ctx = canvas
+                .get_context("2d")
+                .unwrap()
+                .unwrap()
+                .dyn_into::<web_sys::CanvasRenderingContext2d>()
+                .unwrap();
+            ctx.clear_rect(0.0, 0.0, canvas.width() as f64, canvas.height() as f64);
+            for action in history.get_untracked() {
+                draw_on_canvas(&action);
             }
         }
-        len
+    };
+
+    Effect::new(move |prev: Option<(u32, u32)>| {
+        let reset = reset.get();
+        let append = append.get();
+        let actions = history.get();
+
+        match prev {
+            // Initial mount: history may already hold strokes (the panel can be
+            // opened after drawing began), so paint it once.
+            None => paint_all(),
+            Some((last_reset, last_append)) => {
+                if last_reset != reset {
+                    paint_all();
+                } else if append != last_append {
+                    let delta = append.wrapping_sub(last_append) as usize;
+                    let start = actions.len().saturating_sub(delta);
+                    for i in start..actions.len() {
+                        if let Some(action) = actions.get(i) {
+                            // Filter local echo: we already painted it on mousemove.
+                            if let Some(id) = my_id.get()
+                                && action.sender_id == id
+                            {
+                                continue;
+                            }
+                            draw_on_canvas(action);
+                        }
+                    }
+                }
+            }
+        }
+        (reset, append)
     });
 
     let on_mousedown = move |ev: web_sys::MouseEvent| {
@@ -86,6 +120,8 @@ pub fn Whiteboard(
                 end_x,
                 end_y,
                 sender_id: my_id.get().unwrap_or_default(),
+                // The server assigns the authoritative revision on broadcast.
+                rev: 0,
             };
 
             // Draw locally immediately

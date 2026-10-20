@@ -282,6 +282,7 @@ pub fn SettingsDialog(
                                 <input
                                     type="text"
                                     id="settings-display-name"
+                                    maxlength="64"
                                     prop:value=move || display_name.get()
                                     on:input=move |ev| set_display_name.set(event_target_value(&ev))
                                     style="width: 100%;"
@@ -560,6 +561,7 @@ pub fn SettingsDialog(
                                 <input
                                     type="text"
                                     id="branding-logo-url"
+                                    maxlength="2048"
                                     prop:value=logo_url
                                     on:input=move |ev| set_logo_url.set(event_target_value(&ev))
                                     style="width: 100%;"

@@ -68,6 +68,19 @@ pub struct HandlerContext {
     pub set_grid_layout_sig: WriteSignal<String>,
     pub set_whiteboard_history: WriteSignal<Vec<DrawAction>>,
     pub set_last_draw_action: WriteSignal<Option<DrawAction>>,
+    /// Bumped to force the whiteboard canvas to clear and repaint from the
+    /// current history (join snapshot, and throttled after server evictions).
+    pub set_whiteboard_reset: WriteSignal<u32>,
+    /// Bumped on every `Draw` so the canvas can paint just the appended tail.
+    pub set_whiteboard_append: WriteSignal<u32>,
+    /// Wall-clock ms of the last eviction-driven repaint, used to throttle full
+    /// canvas rebuilds when the server evicts strokes.
+    pub whiteboard_repaint_at: SendWrapper<Rc<RefCell<f64>>>,
+    /// Pending trailing repaint so the final post-eviction canvas is authoritative.
+    pub whiteboard_repaint_timer: SendWrapper<Rc<RefCell<Option<gloo_timers::callback::Timeout>>>>,
+    /// Highest stroke `rev` seen. Strokes at or below it are ignored, so a
+    /// resync snapshot followed by replayed buffered draws cannot duplicate.
+    pub whiteboard_max_rev: SendWrapper<Rc<RefCell<u64>>>,
     pub set_shared_video_url: WriteSignal<Option<String>>,
     pub last_ping_time: ReadSignal<f64>,
     pub set_rtt: WriteSignal<u64>,
@@ -88,6 +101,38 @@ pub struct HandlerContext {
     pub set_has_unmute_permission: WriteSignal<bool>,
     pub set_has_camera_permission: WriteSignal<bool>,
     pub remote_control: RemoteControlService,
+}
+
+/// Minimum interval between eviction-driven full canvas rebuilds. Continuous
+/// drawing past the stroke cap emits an eviction per stroke; rebuilding the
+/// whole canvas on each would be the same quadratic work the snapshot-per-draw
+/// approach caused, just moved to the client.
+const WHITEBOARD_REPAINT_INTERVAL_MS: f64 = 1000.0;
+
+/// Rebuild the canvas at most once per `WHITEBOARD_REPAINT_INTERVAL_MS`, with a
+/// trailing repaint so the final state after a burst of evictions is correct.
+fn request_whiteboard_repaint(ctx: &HandlerContext) {
+    let now = js_sys::Date::now();
+    let elapsed = now - *ctx.whiteboard_repaint_at.borrow();
+    if elapsed >= WHITEBOARD_REPAINT_INTERVAL_MS {
+        *ctx.whiteboard_repaint_at.borrow_mut() = now;
+        ctx.set_whiteboard_reset.update(|n| *n = n.wrapping_add(1));
+        return;
+    }
+
+    if ctx.whiteboard_repaint_timer.borrow().is_some() {
+        return;
+    }
+    let delay = (WHITEBOARD_REPAINT_INTERVAL_MS - elapsed).max(0.0) as u32;
+    let reset = ctx.set_whiteboard_reset;
+    let at = ctx.whiteboard_repaint_at.clone();
+    let timer_slot = ctx.whiteboard_repaint_timer.clone();
+    let handle = gloo_timers::callback::Timeout::new(delay, move || {
+        *at.borrow_mut() = js_sys::Date::now();
+        reset.update(|n| *n = n.wrapping_add(1));
+        timer_slot.borrow_mut().take();
+    });
+    *ctx.whiteboard_repaint_timer.borrow_mut() = Some(handle);
 }
 
 pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
@@ -317,12 +362,49 @@ pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
         ServerMessage::Chat { message, room_id } => {
             let current_room = ctx.current_room_id.get_untracked();
             if room_id == current_room {
-                ctx.set_messages.update(|msgs| msgs.push(message));
+                ctx.set_messages.update(|msgs| {
+                    // Ignore a message we already hold. After a lag resync the
+                    // broadcast buffer can replay a `Chat` that was already
+                    // folded into the `ChatHistory` snapshot, and `Chat` appends
+                    // (unlike the id-merged snapshots), so dedupe by identity.
+                    // This keys off the server-assigned id, so two identical
+                    // messages sent in the same millisecond are both kept.
+                    if msgs.iter().any(|m| shared::is_same_chat(m, &message)) {
+                        return;
+                    }
+                    msgs.push(message);
+                    // Mirror the server's retention cap so a long-lived tab
+                    // cannot accumulate more messages than the server keeps.
+                    let excess = msgs.len().saturating_sub(shared::MAX_CHAT_HISTORY);
+                    if excess > 0 {
+                        msgs.drain(0..excess);
+                    }
+                });
             }
         }
         ServerMessage::ChatHistory(history) => {
             if ctx.current_room_id.get_untracked().is_none() {
-                ctx.set_messages.set(history);
+                ctx.set_messages.update(|msgs| {
+                    // The snapshot is authoritative for retained main-room
+                    // public chat, so replace it: a plain merge would resurrect
+                    // public messages from a previous room after a reset. Only
+                    // local *private* messages are preserved (the server never
+                    // retains them, so they are absent from the snapshot).
+                    let mut merged = history;
+                    for m in msgs.iter() {
+                        if m.recipient_id.is_some()
+                            && !merged.iter().any(|x| shared::is_same_chat(x, m))
+                        {
+                            merged.push(m.clone());
+                        }
+                    }
+                    merged.sort_by_key(|m| m.timestamp);
+                    let excess = merged.len().saturating_sub(shared::MAX_CHAT_HISTORY);
+                    if excess > 0 {
+                        merged.drain(0..excess);
+                    }
+                    *msgs = merged;
+                });
             }
         }
         ServerMessage::ParticipantJoined(p) => {
@@ -606,6 +688,19 @@ pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
                 if !list.iter().any(|p| p.id == poll.id) {
                     list.push(poll);
                 }
+                // Mirror the server's poll cap so a long-lived tab cannot
+                // accumulate more polls than the server retains.
+                let excess = list.len().saturating_sub(shared::MAX_POLLS);
+                if excess > 0 {
+                    list.drain(0..excess);
+                }
+            });
+        }
+        ServerMessage::PollRemoved(ids) => {
+            // The server evicted these polls to stay under its cap; drop them
+            // so we do not offer a vote the server would reject.
+            ctx.set_polls.update(|list| {
+                list.retain(|p| !ids.contains(&p.id));
             });
         }
         ServerMessage::PollUpdated(poll) => {
@@ -740,11 +835,43 @@ pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
             ctx.set_polls.set(list);
         }
         ServerMessage::Draw(action) => {
+            // Ignore strokes we already hold (rev not newer than the newest
+            // seen). This makes the resync-on-lag snapshot safe: buffered draws
+            // replayed after it are dropped instead of duplicating strokes.
+            if action.rev <= *ctx.whiteboard_max_rev.borrow() {
+                return;
+            }
+            *ctx.whiteboard_max_rev.borrow_mut() = action.rev;
             ctx.set_last_draw_action.set(Some(action.clone()));
             ctx.set_whiteboard_history.update(|h| h.push(action));
+            // Separate monotonic counter: the canvas paints only the appended
+            // tail from it, since evictions trim the front of the history (so a
+            // length-based diff would stop detecting new strokes at the cap).
+            ctx.set_whiteboard_append.update(|n| *n = n.wrapping_add(1));
+        }
+        ServerMessage::WhiteboardEvicted { count } => {
+            // The server dropped the oldest strokes. Trim the same prefix so our
+            // retained history matches, then schedule a canvas rebuild — but at
+            // a bounded cadence, so continuous drawing past the cap does not
+            // repaint the whole canvas (or receive the whole history) per stroke.
+            ctx.set_whiteboard_history.update(|h| {
+                let n = (count as usize).min(h.len());
+                h.drain(0..n);
+            });
+            request_whiteboard_repaint(ctx);
         }
         ServerMessage::WhiteboardHistory(history) => {
+            // Authoritative snapshot, sent on join and after a broadcast lag.
+            // Replace our history and force a full clear-and-repaint so a
+            // long-lived tab is bounded and every participant sees the same
+            // canvas. Raise (never lower) the newest rev so replayed buffered
+            // draws that predate the snapshot are ignored; keeping it monotonic
+            // also covers an empty snapshot after a room reset.
+            let snapshot_max = history.iter().map(|a| a.rev).max().unwrap_or(0);
+            let mut max_rev = ctx.whiteboard_max_rev.borrow_mut();
+            *max_rev = (*max_rev).max(snapshot_max);
             ctx.set_whiteboard_history.set(history);
+            ctx.set_whiteboard_reset.update(|n| *n = n.wrapping_add(1));
         }
         ServerMessage::VideoShared(url) => {
             ctx.set_shared_video_url.set(Some(url));
