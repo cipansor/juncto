@@ -129,6 +129,13 @@ pub struct DrawAction {
     pub width: f64,
     #[serde(default)] // For backward compatibility if needed, though we are migrating fresh
     pub sender_id: String,
+    /// Monotonic revision assigned by the server in whiteboard order. A client
+    /// ignores any stroke whose `rev` is not greater than the newest it already
+    /// holds, so strokes replayed after a resync snapshot (see the lag path in
+    /// the broadcast task) are not duplicated. Client-sent draws leave this at
+    /// 0; the server overwrites it.
+    #[serde(default)]
+    pub rev: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

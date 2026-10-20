@@ -78,6 +78,9 @@ pub struct HandlerContext {
     pub whiteboard_repaint_at: SendWrapper<Rc<RefCell<f64>>>,
     /// Pending trailing repaint so the final post-eviction canvas is authoritative.
     pub whiteboard_repaint_timer: SendWrapper<Rc<RefCell<Option<gloo_timers::callback::Timeout>>>>,
+    /// Highest stroke `rev` seen. Strokes at or below it are ignored, so a
+    /// resync snapshot followed by replayed buffered draws cannot duplicate.
+    pub whiteboard_max_rev: SendWrapper<Rc<RefCell<u64>>>,
     pub set_shared_video_url: WriteSignal<Option<String>>,
     pub last_ping_time: ReadSignal<f64>,
     pub set_rtt: WriteSignal<u64>,
@@ -803,6 +806,13 @@ pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
             ctx.set_polls.set(list);
         }
         ServerMessage::Draw(action) => {
+            // Ignore strokes we already hold (rev not newer than the newest
+            // seen). This makes the resync-on-lag snapshot safe: buffered draws
+            // replayed after it are dropped instead of duplicating strokes.
+            if action.rev <= *ctx.whiteboard_max_rev.borrow() {
+                return;
+            }
+            *ctx.whiteboard_max_rev.borrow_mut() = action.rev;
             ctx.set_last_draw_action.set(Some(action.clone()));
             ctx.set_whiteboard_history.update(|h| h.push(action));
             // Separate monotonic counter: the canvas paints only the appended
@@ -822,9 +832,15 @@ pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
             request_whiteboard_repaint(ctx);
         }
         ServerMessage::WhiteboardHistory(history) => {
-            // Authoritative snapshot on join. Replace our history and force a
-            // full clear-and-repaint so a long-lived tab is bounded and every
-            // participant sees the same canvas.
+            // Authoritative snapshot, sent on join and after a broadcast lag.
+            // Replace our history and force a full clear-and-repaint so a
+            // long-lived tab is bounded and every participant sees the same
+            // canvas. Raise (never lower) the newest rev so replayed buffered
+            // draws that predate the snapshot are ignored; keeping it monotonic
+            // also covers an empty snapshot after a room reset.
+            let snapshot_max = history.iter().map(|a| a.rev).max().unwrap_or(0);
+            let mut max_rev = ctx.whiteboard_max_rev.borrow_mut();
+            *max_rev = (*max_rev).max(snapshot_max);
             ctx.set_whiteboard_history.set(history);
             ctx.set_whiteboard_reset.update(|n| *n = n.wrapping_add(1));
         }

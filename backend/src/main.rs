@@ -49,6 +49,10 @@ pub struct AppState {
     /// (rather than the max of the retained polls) so `created_seq` stays unique
     /// even across replacements and evictions.
     pub poll_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// Monotonic source of whiteboard stroke revisions. Process-wide (not the
+    /// retained tail) so a room reset that empties the whiteboard does not
+    /// restart revisions at 1, which a long-lived client would then reject.
+    pub whiteboard_rev: Arc<std::sync::atomic::AtomicU64>,
     /// Shared secret required to reset the global room via `POST /api/rooms`.
     /// Read from `ROOM_ADMIN_TOKEN`; when unset the endpoint is disabled, so a
     /// self-hosted deployment is not trivially disrupted by any anonymous
@@ -86,6 +90,7 @@ async fn main() {
     let camera_permissions = Arc::new(Mutex::new(HashSet::new()));
     let feedback_timestamps = Arc::new(Mutex::new(HashMap::new()));
     let poll_seq = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let whiteboard_rev = Arc::new(std::sync::atomic::AtomicU64::new(1));
     // Optional shared secret for the room-reset endpoint. Absent (the default)
     // means the endpoint stays disabled rather than open.
     let admin_token = std::env::var("ROOM_ADMIN_TOKEN")
@@ -111,6 +116,7 @@ async fn main() {
         camera_permissions,
         feedback_timestamps,
         poll_seq,
+        whiteboard_rev,
         admin_token,
     });
 

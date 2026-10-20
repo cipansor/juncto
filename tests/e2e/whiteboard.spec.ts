@@ -61,7 +61,7 @@ test.describe('Whiteboard', () => {
     await contextB.close();
   });
 
-  test('drawing past the stroke cap does not retransmit the whole whiteboard', async ({ request }) => {
+  test('drawing past the stroke cap evicts the oldest strokes without retransmitting the whole whiteboard', async ({ request }) => {
     const roomName = `WhiteboardCap_${Date.now()}`;
     await request.post('/api/rooms', {
       data: {
@@ -75,36 +75,41 @@ test.describe('Whiteboard', () => {
       },
     });
 
-    // Raw WebSocket client so we can count protocol messages directly.
-    let historyCount = 0;
-    const socket = new WebSocket('ws://localhost:3000/ws/chat');
+    const CAP = 10000;
+    const EXTRA = 50;
+
+    // Raw WebSocket client so we can drive the protocol directly and observe
+    // what the server broadcasts back to the drawer.
+    let perDrawHistory = 0;
+    let evictionMessages = 0;
+    const drawer = new WebSocket('ws://localhost:3000/ws/chat');
     await new Promise<void>((resolve, reject) => {
-      socket.onopen = () => resolve();
-      socket.onerror = (e) => reject(e);
+      drawer.onopen = () => resolve();
+      drawer.onerror = (e) => reject(e);
     });
-    socket.onmessage = (e) => {
+    drawer.onmessage = (e) => {
       try {
-        if (JSON.parse(String(e.data)).type === 'WhiteboardHistory') {
-          historyCount++;
+        const msg = JSON.parse(String(e.data));
+        if (msg.type === 'WhiteboardHistory') {
+          // Only a throttled lag-resync may send this; a draw never should.
+          perDrawHistory++;
+        } else if (msg.type === 'WhiteboardEvicted') {
+          evictionMessages++;
         }
       } catch {
         /* ignore non-JSON frames */
       }
     };
 
-    socket.send(JSON.stringify({
+    drawer.send(JSON.stringify({
       type: 'Join',
       payload: { name: 'Drawer', is_visitor: false },
     }));
-    // The room was just reset, so the join snapshot is skipped (empty history);
-    // any WhiteboardHistory we see from here on would be an over-broadcast.
     await new Promise((r) => setTimeout(r, 500));
-    expect(historyCount).toBe(0);
+    // The room was just reset, so the join snapshot is skipped (empty history).
+    expect(perDrawHistory).toBe(0);
 
-    // Drive well past the 10_000-stroke cap. Before the fix every draw past the
-    // cap re-broadcast the entire 10_000-stroke history; now it must emit only
-    // the stroke (plus a tiny eviction notice), so no snapshot may appear.
-    const draw = (i: number) => socket.send(JSON.stringify({
+    const draw = (i: number) => drawer.send(JSON.stringify({
       type: 'Draw',
       payload: {
         color: '#000000',
@@ -117,8 +122,10 @@ test.describe('Whiteboard', () => {
       },
     }));
 
-    const CAP = 10000;
-    for (let i = 0; i < CAP + 50; i++) {
+    // Drive well past the cap. Before the fix every draw past the cap
+    // re-broadcast the entire 10_000-stroke history; now a draw emits only the
+    // stroke plus a tiny eviction notice.
+    for (let i = 0; i < CAP + EXTRA; i++) {
       draw(i);
       // Yield periodically so the Node WebSocket buffer drains.
       if (i % 500 === 0) {
@@ -126,9 +133,42 @@ test.describe('Whiteboard', () => {
       }
     }
     await new Promise((r) => setTimeout(r, 3000));
+    drawer.close();
 
-    socket.close();
+    // Eviction must have happened (otherwise a slow run that never reached the
+    // cap would pass without exercising the eviction path).
+    expect(evictionMessages).toBeGreaterThan(0);
+    // Snapshots, if any, come only from the throttled lag-resync path, never
+    // one-per-draw: strictly fewer than the number of evicting draws.
+    expect(perDrawHistory).toBeLessThan(EXTRA);
 
-    expect(historyCount).toBe(0);
+    // Deterministic proof the server capped its history: a fresh join snapshot
+    // must carry exactly the cap, and its oldest stroke must be the 50th draw
+    // (i = EXTRA), proving the first EXTRA strokes were evicted.
+    const observer = new WebSocket('ws://localhost:3000/ws/chat');
+    const history = await new Promise<any[]>((resolve, reject) => {
+      observer.onopen = () => {
+        observer.send(JSON.stringify({
+          type: 'Join',
+          payload: { name: 'Observer', is_visitor: false },
+        }));
+      };
+      observer.onerror = (e) => reject(e);
+      observer.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(String(e.data));
+          if (msg.type === 'WhiteboardHistory') {
+            resolve(msg.payload);
+          }
+        } catch {
+          /* ignore non-JSON frames */
+        }
+      };
+      setTimeout(() => reject(new Error('no WhiteboardHistory on join')), 10000);
+    });
+    observer.close();
+
+    expect(history.length).toBe(CAP);
+    expect(history[0].start_x).toBe(EXTRA % 100);
   });
 });

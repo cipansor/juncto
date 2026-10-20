@@ -2,55 +2,45 @@ use crate::AppState;
 use shared::{DrawAction, ServerMessage};
 use std::sync::Arc;
 
-/// Result of a draw action: the message to broadcast, plus how many of the
-/// oldest strokes were evicted. The caller broadcasts that count (not a full
-/// snapshot) so clients can trim their history and repaint at a bounded
-/// cadence, rather than receiving the whole history on every draw past the cap.
-#[derive(Debug)]
-pub struct DrawOutcome {
-    pub message: ServerMessage,
-    pub evicted: u32,
-}
-
-pub fn process_draw_action(
-    user_id: &str,
-    mut action: DrawAction,
-    state: &Arc<AppState>,
-) -> DrawOutcome {
+/// Apply a draw and broadcast it (plus any eviction notice) while still holding
+/// the whiteboard lock.
+///
+/// Holding the lock across the broadcast is deliberate: it makes mutation and
+/// delivery one atomic step, so two sockets drawing concurrently cannot
+/// interleave a mutation and its broadcast. Without it, clients could retain
+/// strokes in a different order than the server (A stores, B stores+broadcasts,
+/// A broadcasts) and the count-only eviction notice cannot repair that.
+///
+/// The stroke is stamped with a monotonic `rev` from a process-wide counter
+/// (still assigned under the lock, so it matches retained order). A resynced
+/// client drops any stroke whose rev it has already seen, so strokes replayed
+/// from the broadcast buffer after a `WhiteboardHistory` snapshot are not
+/// duplicated.
+///
+/// Returns the number of oldest strokes evicted (0 unless the cap was exceeded).
+pub fn apply_draw(user_id: &str, mut action: DrawAction, state: &Arc<AppState>) -> u32 {
+    let mut wb = state.whiteboard.lock().unwrap();
     action.sender_id = user_id.to_string();
-    let mut evicted: u32 = 0;
-    {
-        let mut wb = state.whiteboard.lock().unwrap();
-        wb.push(action.clone());
-        let excess = wb.len().saturating_sub(shared::MAX_WHITEBOARD_STROKES);
-        if excess > 0 {
-            wb.drain(0..excess);
-            evicted = excess as u32;
-        }
+    action.rev = state
+        .whiteboard_rev
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    wb.push(action.clone());
+    let excess = wb.len().saturating_sub(shared::MAX_WHITEBOARD_STROKES);
+    if excess > 0 {
+        wb.drain(0..excess);
     }
-    DrawOutcome {
-        message: ServerMessage::Draw(action),
-        evicted,
-    }
-}
+    let evicted = excess as u32;
 
-/// Messages a draw contributes to the broadcast channel: the stroke itself, plus
-/// an eviction notice when the cap was exceeded. Deliberately never a full
-/// snapshot — sending one per draw once the cap is reached is the quadratic
-/// blow-up this protocol avoids.
-pub fn draw_broadcast(
-    user_id: &str,
-    action: DrawAction,
-    state: &Arc<AppState>,
-) -> Vec<ServerMessage> {
-    let outcome = process_draw_action(user_id, action, state);
-    let mut messages = vec![outcome.message];
-    if outcome.evicted > 0 {
-        messages.push(ServerMessage::WhiteboardEvicted {
-            count: outcome.evicted,
-        });
+    // Never a full snapshot here: sending the whole history on every draw past
+    // the cap is the quadratic blow-up this protocol exists to avoid. Clients
+    // resynchronize via `WhiteboardHistory` on join and after a broadcast lag.
+    let _ = state.tx.send(ServerMessage::Draw(action));
+    if evicted > 0 {
+        let _ = state
+            .tx
+            .send(ServerMessage::WhiteboardEvicted { count: evicted });
     }
-    messages
+    evicted
 }
 
 #[cfg(test)]
@@ -83,6 +73,7 @@ mod tests {
             camera_permissions: Arc::new(Mutex::new(std::collections::HashSet::new())),
             feedback_timestamps: Arc::new(Mutex::new(HashMap::new())),
             poll_seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            whiteboard_rev: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             admin_token: None,
         })
     }
@@ -98,22 +89,18 @@ mod tests {
             end_x: 10.0,
             end_y: 10.0,
             sender_id: "".to_string(), // Should be overwritten
+            rev: 0,
         };
 
-        let outcome = process_draw_action("user1", action, &state);
-
-        match outcome.message {
-            ServerMessage::Draw(a) => {
-                assert_eq!(a.sender_id, "user1");
-                assert_eq!(a.end_x, 10.0);
-            }
-            _ => panic!("Wrong message type"),
-        }
-        assert_eq!(outcome.evicted, 0);
+        let evicted = apply_draw("user1", action, &state);
+        assert_eq!(evicted, 0);
 
         let wb = state.whiteboard.lock().unwrap();
         assert_eq!(wb.len(), 1);
         assert_eq!(wb[0].sender_id, "user1");
+        assert_eq!(wb[0].end_x, 10.0);
+        // The stroke is stamped with a non-zero revision under the lock.
+        assert!(wb[0].rev > 0);
     }
 
     #[test]
@@ -129,8 +116,9 @@ mod tests {
                 end_x: i as f64,
                 end_y: 10.0,
                 sender_id: "".to_string(),
+                rev: 0,
             };
-            total_evicted += process_draw_action("user1", action, &state).evicted;
+            total_evicted += apply_draw("user1", action, &state);
         }
 
         // Ten draws pushed past the cap, so exactly ten strokes must have been
@@ -145,6 +133,9 @@ mod tests {
             (shared::MAX_WHITEBOARD_STROKES + 9) as f64
         );
         assert_eq!(wb.first().unwrap().start_x, 10.0);
+        // Revisions are strictly increasing in retained order, so a client can
+        // dedupe replayed strokes and detect gaps.
+        assert!(wb.windows(2).all(|w| w[0].rev < w[1].rev));
     }
 
     #[test]
@@ -161,10 +152,14 @@ mod tests {
                 end_x: i as f64,
                 end_y: 1.0,
                 sender_id: String::new(),
+                rev: 0,
             };
-            process_draw_action("user1", action, &state);
+            apply_draw("user1", action, &state);
         }
 
+        // Subscribe only now: the channel capacity is far below the cap, so a
+        // subscription taken before the fill would be permanently lagged.
+        let mut rx = state.tx.subscribe();
         let action = DrawAction {
             color: "#000".to_string(),
             width: 1.0,
@@ -173,19 +168,21 @@ mod tests {
             end_x: 2.0,
             end_y: 2.0,
             sender_id: String::new(),
+            rev: 0,
         };
-        let messages = draw_broadcast("user1", action, &state);
+        apply_draw("user1", action, &state);
 
-        assert_eq!(messages.len(), 2);
-        assert!(matches!(messages[0], ServerMessage::Draw(_)));
-        match &messages[1] {
-            ServerMessage::WhiteboardEvicted { count } => assert_eq!(*count, 1),
+        // The draw past the cap emits the stroke plus a 1-stroke eviction
+        // notice, and nothing else — in particular no full history snapshot.
+        let first = rx.try_recv().expect("draw broadcast");
+        assert!(matches!(first, ServerMessage::Draw(_)));
+        let second = rx.try_recv().expect("eviction broadcast");
+        match second {
+            ServerMessage::WhiteboardEvicted { count } => assert_eq!(count, 1),
             other => panic!("expected eviction notice, got {other:?}"),
         }
         assert!(
-            !messages
-                .iter()
-                .any(|m| matches!(m, ServerMessage::WhiteboardHistory(_))),
+            !matches!(rx.try_recv(), Ok(ServerMessage::WhiteboardHistory(_))),
             "a draw must never re-broadcast the whole history"
         );
     }

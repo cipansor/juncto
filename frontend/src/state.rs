@@ -263,6 +263,10 @@ pub fn use_room_state() -> RoomState {
         SendWrapper::new(Rc::new(RefCell::new(0.0)));
     let whiteboard_repaint_timer: SendWrapper<Rc<RefCell<Option<gloo_timers::callback::Timeout>>>> =
         SendWrapper::new(Rc::new(RefCell::new(None)));
+    // Highest stroke `rev` seen, so strokes replayed after a resync snapshot
+    // (see the broadcast-lag path) are ignored instead of duplicated.
+    let whiteboard_max_rev: SendWrapper<Rc<RefCell<u64>>> =
+        SendWrapper::new(Rc::new(RefCell::new(0)));
     let (my_id, set_my_id) = signal(None::<String>);
     let (local_stream, set_local_stream) = signal(None::<MediaStream>);
     let (local_screen_stream, set_local_screen_stream) = signal(None::<MediaStream>);
@@ -877,6 +881,7 @@ pub fn use_room_state() -> RoomState {
         let remote_control = remote_control.clone();
         let whiteboard_repaint_at_for_ws = whiteboard_repaint_at.clone();
         let whiteboard_repaint_timer_for_ws = whiteboard_repaint_timer.clone();
+        let whiteboard_max_rev_for_ws = whiteboard_max_rev.clone();
         move |_| {
             let analytics = analytics_for_ws.clone();
             let remote_control_for_effect = remote_control.clone();
@@ -885,6 +890,7 @@ pub fn use_room_state() -> RoomState {
             let recording_stream_id_for_cleanup = recording_stream_id_for_cleanup.clone();
             let whiteboard_repaint_at = whiteboard_repaint_at_for_ws.clone();
             let whiteboard_repaint_timer = whiteboard_repaint_timer_for_ws.clone();
+            let whiteboard_max_rev = whiteboard_max_rev_for_ws.clone();
             set_my_id.set(None);
             set_room_config.set(shared::RoomConfig::default());
 
@@ -962,6 +968,7 @@ pub fn use_room_state() -> RoomState {
                                 set_whiteboard_append,
                                 whiteboard_repaint_at: whiteboard_repaint_at.clone(),
                                 whiteboard_repaint_timer: whiteboard_repaint_timer.clone(),
+                                whiteboard_max_rev: whiteboard_max_rev.clone(),
                                 set_shared_video_url,
                                 last_ping_time,
                                 set_rtt,

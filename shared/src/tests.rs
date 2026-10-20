@@ -391,6 +391,7 @@ fn test_draw_serialization() {
         end_y: 40.0,
         width: 2.0,
         sender_id: "user1".to_string(),
+        rev: 0,
     };
     let msg = ClientMessage::Draw(draw.clone());
     let json = serde_json::to_string(&msg).unwrap();

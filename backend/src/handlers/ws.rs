@@ -976,6 +976,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     let my_id_clone = id.clone();
                                     let room_config_for_task = room_config_mutex.clone();
                                     let locations_clone = participant_locations_mutex.clone();
+                                    let whiteboard_for_task = whiteboard_mutex.clone();
 
                                     broadcast_task = Some(tokio::spawn(async move {
                                         loop {
@@ -1159,7 +1160,31 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                     if should_send
                                                         && forward_tx.send(msg).await.is_err() { break; }
                                                 },
-                                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                                    // We missed broadcasts, possibly whiteboard
+                                                    // draws/evictions. A count-only eviction
+                                                    // notice cannot repair that, so resend an
+                                                    // authoritative snapshot; the client
+                                                    // replaces its history and repaints. The
+                                                    // client also drops strokes it already has
+                                                    // (by revision), so any draws replayed from
+                                                    // the buffer after this snapshot are safe.
+                                                    // This cannot loop unboundedly: sending the
+                                                    // snapshot awaits `forward_tx`, so a socket
+                                                    // that is not draining blocks here instead of
+                                                    // hitting `Lagged` again.
+                                                    let history: Vec<shared::DrawAction> = {
+                                                        let wb = whiteboard_for_task.lock().unwrap();
+                                                        wb.clone()
+                                                    };
+                                                    if forward_tx
+                                                        .send(ServerMessage::WhiteboardHistory(history))
+                                                        .await
+                                                        .is_err()
+                                                    {
+                                                        break;
+                                                    }
+                                                }
                                                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                             }
                                         }
@@ -1357,9 +1382,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             let _ = internal_tx.send(ServerMessage::Error("Visitors cannot draw on the whiteboard".to_string())).await;
                                             continue;
                                         }
-                                        for message in whiteboard::draw_broadcast(uid, action, &state) {
-                                            let _ = tx.send(message);
-                                        }
+                                        // Mutation + broadcast happen atomically
+                                        // under the whiteboard lock (see
+                                        // `apply_draw`), so concurrent drawers
+                                        // cannot reach clients out of order.
+                                        whiteboard::apply_draw(uid, action, &state);
                                     }
                                 },
                                 ClientMessage::Reaction(emoji) => {
@@ -1962,6 +1989,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                             let my_id_clone = id.clone();
                             let room_config_clone = room_config_mutex.clone();
                             let locations_clone = participant_locations_mutex.clone();
+                            let whiteboard_for_task = whiteboard_mutex.clone();
                             broadcast_task = Some(tokio::spawn(async move {
                                 loop {
                                     match rx.recv().await {
@@ -2130,7 +2158,26 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             if should_send
                                                 && forward_tx.send(msg).await.is_err() { break; }
                                         },
-                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                            // Missed broadcasts may include whiteboard
+                                            // draws/evictions, which a count-only notice
+                                            // cannot repair. Resend an authoritative
+                                            // snapshot so the client can replace its
+                                            // history. Safe against replayed buffered
+                                            // draws because the client drops strokes it
+                                            // already holds (by revision).
+                                            let history: Vec<shared::DrawAction> = {
+                                                let wb = whiteboard_for_task.lock().unwrap();
+                                                wb.clone()
+                                            };
+                                            if forward_tx
+                                                .send(ServerMessage::WhiteboardHistory(history))
+                                                .await
+                                                .is_err()
+                                            {
+                                                break;
+                                            }
+                                        }
                                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                     }
                                 }

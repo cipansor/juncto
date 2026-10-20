@@ -120,6 +120,8 @@ pub fn Whiteboard(
                 end_x,
                 end_y,
                 sender_id: my_id.get().unwrap_or_default(),
+                // The server assigns the authoritative revision on broadcast.
+                rev: 0,
             };
 
             // Draw locally immediately
