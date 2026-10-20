@@ -363,6 +363,17 @@ pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
             let current_room = ctx.current_room_id.get_untracked();
             if room_id == current_room {
                 ctx.set_messages.update(|msgs| {
+                    // Ignore a message we already hold. After a lag resync the
+                    // broadcast buffer can replay a `Chat` that was already
+                    // folded into the `ChatHistory` snapshot, and `Chat` appends
+                    // (unlike the id-merged snapshots), so dedupe by content.
+                    if msgs.iter().any(|m| {
+                        m.timestamp == message.timestamp
+                            && m.user_id == message.user_id
+                            && m.content == message.content
+                    }) {
+                        return;
+                    }
                     msgs.push(message);
                     // Mirror the server's retention cap so a long-lived tab
                     // cannot accumulate more messages than the server keeps.
@@ -375,7 +386,27 @@ pub fn handle_server_message(server_msg: ServerMessage, ctx: &HandlerContext) {
         }
         ServerMessage::ChatHistory(history) => {
             if ctx.current_room_id.get_untracked().is_none() {
-                ctx.set_messages.set(history);
+                ctx.set_messages.update(|msgs| {
+                    // Merge the authoritative snapshot with anything already
+                    // held. `ChatHistory` only carries retained main-room public
+                    // messages, so a plain replace would drop private messages
+                    // (never retained server-side); merging also de-duplicates a
+                    // message replayed from the buffer after a lag resync.
+                    let mut merged = history;
+                    for m in msgs.iter() {
+                        if !merged.iter().any(|x| {
+                            x.timestamp == m.timestamp && x.user_id == m.user_id && x.content == m.content
+                        }) {
+                            merged.push(m.clone());
+                        }
+                    }
+                    merged.sort_by_key(|m| m.timestamp);
+                    let excess = merged.len().saturating_sub(shared::MAX_CHAT_HISTORY);
+                    if excess > 0 {
+                        merged.drain(0..excess);
+                    }
+                    *msgs = merged;
+                });
             }
         }
         ServerMessage::ParticipantJoined(p) => {

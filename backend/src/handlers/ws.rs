@@ -16,7 +16,7 @@ use axum::{
     response::IntoResponse,
 };
 use futures::{sink::SinkExt, stream::StreamExt};
-use shared::{ClientMessage, Participant, RoomConfig, ServerMessage};
+use shared::{BreakoutRoom, ClientMessage, Participant, Poll, RoomConfig, ServerMessage};
 use std::sync::Arc;
 use tracing;
 
@@ -25,6 +25,60 @@ use tracing;
 /// single frame carry a multi-megabyte payload, so we set an explicit, tighter
 /// limit.
 const MAX_WS_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
+/// Authoritative snapshots used to recover a socket that fell behind the
+/// broadcast channel.
+///
+/// `RecvError::Lagged` means an unknown set of broadcasts was dropped. The
+/// incremental messages cannot repair that (a missed `Draw` or `PollRemoved`
+/// carries no way to reconstruct what was lost), so instead of continuing from
+/// a corrupt view we re-send the retained state. The whiteboard additionally
+/// uses per-stroke revisions to dedupe the replayed tail; the other snapshots
+/// replace client state wholesale (or merge by id), so re-sending them is safe.
+///
+/// The participant list and chat history are scoped to `room_id`, matching what
+/// the socket would have seen: main-room chat is retained, breakout-room chat
+/// is not. Polls and the whiteboard are room-wide. Snapshots are sent even when
+/// empty so state the client holds but the server no longer retains (an evicted
+/// poll, a stroke cleared by a room reset, a video that stopped) is cleared
+/// rather than left stale; the client merges chat by content so replaying the
+/// retained tail cannot duplicate a message.
+fn lag_resync_messages(state: &Arc<AppState>, room_id: Option<String>) -> Vec<ServerMessage> {
+    let mut msgs = Vec::new();
+
+    let participants: Vec<Participant> = {
+        let all = state.participants.lock().unwrap();
+        let locs = state.participant_locations.lock().unwrap();
+        all.values()
+            .filter(|p| locs.get(&p.id).cloned().flatten() == room_id)
+            .cloned()
+            .collect()
+    };
+    msgs.push(ServerMessage::ParticipantList(participants));
+
+    if room_id.is_none() {
+        let history = state.chat_history.lock().unwrap().clone();
+        if !history.is_empty() {
+            msgs.push(ServerMessage::ChatHistory(history));
+        }
+    }
+
+    let polls: Vec<Poll> = state.polls.lock().unwrap().values().cloned().collect();
+    msgs.push(ServerMessage::PollsList(polls));
+
+    let rooms: Vec<BreakoutRoom> = state.breakout_rooms.lock().unwrap().values().cloned().collect();
+    msgs.push(ServerMessage::BreakoutRoomsList(rooms));
+
+    let whiteboard = state.whiteboard.lock().unwrap().clone();
+    msgs.push(ServerMessage::WhiteboardHistory(whiteboard));
+
+    match state.shared_video_url.lock().unwrap().clone() {
+        Some(url) => msgs.push(ServerMessage::VideoShared(url)),
+        None => msgs.push(ServerMessage::VideoStopped),
+    }
+
+    msgs
+}
 
 pub async fn chat_handler(
     ws: WebSocketUpgrade,
@@ -976,7 +1030,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     let my_id_clone = id.clone();
                                     let room_config_for_task = room_config_mutex.clone();
                                     let locations_clone = participant_locations_mutex.clone();
-                                    let whiteboard_for_task = whiteboard_mutex.clone();
+                                    let state_for_task = state.clone();
 
                                     broadcast_task = Some(tokio::spawn(async move {
                                         loop {
@@ -1161,27 +1215,29 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                         && forward_tx.send(msg).await.is_err() { break; }
                                                 },
                                                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                                    // We missed broadcasts, possibly whiteboard
-                                                    // draws/evictions. A count-only eviction
-                                                    // notice cannot repair that, so resend an
-                                                    // authoritative snapshot; the client
-                                                    // replaces its history and repaints. The
-                                                    // client also drops strokes it already has
-                                                    // (by revision), so any draws replayed from
-                                                    // the buffer after this snapshot are safe.
-                                                    // This cannot loop unboundedly: sending the
-                                                    // snapshot awaits `forward_tx`, so a socket
-                                                    // that is not draining blocks here instead of
-                                                    // hitting `Lagged` again.
-                                                    let history: Vec<shared::DrawAction> = {
-                                                        let wb = whiteboard_for_task.lock().unwrap();
-                                                        wb.clone()
+                                                    // We missed an unknown set of broadcasts. The
+                                                    // incremental messages cannot repair that
+                                                    // (a missed `Draw`/`PollRemoved` carries no
+                                                    // way to reconstruct it), so re-send the
+                                                    // retained state for this socket's room and
+                                                    // let the client replace its view. This
+                                                    // cannot loop unboundedly: sending awaits
+                                                    // `forward_tx`, so a socket that is not
+                                                    // draining blocks here instead of hitting
+                                                    // `Lagged` again.
+                                                    let my_room = {
+                                                        let locs = locations_clone.lock().unwrap();
+                                                        locs.get(&my_id_clone).cloned().flatten()
                                                     };
-                                                    if forward_tx
-                                                        .send(ServerMessage::WhiteboardHistory(history))
-                                                        .await
-                                                        .is_err()
-                                                    {
+                                                    let msgs = lag_resync_messages(&state_for_task, my_room);
+                                                    let mut send_failed = false;
+                                                    for msg in msgs {
+                                                        if forward_tx.send(msg).await.is_err() {
+                                                            send_failed = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                    if send_failed {
                                                         break;
                                                     }
                                                 }
@@ -1989,7 +2045,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                             let my_id_clone = id.clone();
                             let room_config_clone = room_config_mutex.clone();
                             let locations_clone = participant_locations_mutex.clone();
-                            let whiteboard_for_task = whiteboard_mutex.clone();
+                            let state_for_task = state.clone();
                             broadcast_task = Some(tokio::spawn(async move {
                                 loop {
                                     match rx.recv().await {
@@ -2159,22 +2215,23 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                 && forward_tx.send(msg).await.is_err() { break; }
                                         },
                                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                            // Missed broadcasts may include whiteboard
-                                            // draws/evictions, which a count-only notice
-                                            // cannot repair. Resend an authoritative
-                                            // snapshot so the client can replace its
-                                            // history. Safe against replayed buffered
-                                            // draws because the client drops strokes it
-                                            // already holds (by revision).
-                                            let history: Vec<shared::DrawAction> = {
-                                                let wb = whiteboard_for_task.lock().unwrap();
-                                                wb.clone()
+                                            // Missed an unknown set of broadcasts. Re-send the
+                                            // retained state for this socket's room so the
+                                            // client can replace its view; incremental
+                                            // messages cannot repair the gap.
+                                            let my_room = {
+                                                let locs = locations_clone.lock().unwrap();
+                                                locs.get(&my_id_clone).cloned().flatten()
                                             };
-                                            if forward_tx
-                                                .send(ServerMessage::WhiteboardHistory(history))
-                                                .await
-                                                .is_err()
-                                            {
+                                            let msgs = lag_resync_messages(&state_for_task, my_room);
+                                            let mut send_failed = false;
+                                            for msg in msgs {
+                                                if forward_tx.send(msg).await.is_err() {
+                                                    send_failed = true;
+                                                    break;
+                                                }
+                                            }
+                                            if send_failed {
                                                 break;
                                             }
                                         }
@@ -2351,8 +2408,151 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 }
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    fn create_mock_state() -> Arc<AppState> {
+        let (tx, _) = tokio::sync::broadcast::channel(10);
+        Arc::new(AppState {
+            tx,
+            participants: Arc::new(Mutex::new(HashMap::new())),
+            knocking_participants: Arc::new(Mutex::new(HashMap::new())),
+            room_config: Arc::new(Mutex::new(RoomConfig::default())),
+            polls: Arc::new(Mutex::new(HashMap::new())),
+            whiteboard: Arc::new(Mutex::new(Vec::new())),
+            chat_history: Arc::new(Mutex::new(Vec::new())),
+            breakout_rooms: Arc::new(Mutex::new(HashMap::new())),
+            participant_locations: Arc::new(Mutex::new(HashMap::new())),
+            shared_video_url: Arc::new(Mutex::new(None)),
+            speaking_start_times: Arc::new(Mutex::new(HashMap::new())),
+            feedback: Arc::new(Mutex::new(Vec::new())),
+            remote_control_sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_remote_control_requests: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            unmute_permissions: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            camera_permissions: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            feedback_timestamps: Arc::new(Mutex::new(HashMap::new())),
+            poll_seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            whiteboard_rev: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            admin_token: None,
+        })
+    }
+
+    fn participant(id: &str) -> Participant {
+        Participant {
+            id: id.to_string(),
+            name: id.to_string(),
+            is_hand_raised: false,
+            is_sharing_screen: false,
+            is_muted: false,
+            is_camera_muted: false,
+            speaking_time: 0,
+            presence: shared::PresenceStatus::default(),
+            is_visitor: false,
+            e2ee_enabled: false,
+            hand_raised_at: None,
+            avatar_url: None,
+        }
+    }
+
     #[test]
     fn test_ws_handler() {
         let _ = true;
+    }
+
+    #[test]
+    fn lag_resync_always_restores_video_and_scopes_state_to_room() {
+        let state = create_mock_state();
+
+        // Two participants: one in the main room (None), one in breakout "b1".
+        state.participants.lock().unwrap().insert("main".into(), participant("main"));
+        state.participants.lock().unwrap().insert("break".into(), participant("break"));
+        state
+            .participant_locations
+            .lock()
+            .unwrap()
+            .insert("main".into(), None);
+        state
+            .participant_locations
+            .lock()
+            .unwrap()
+            .insert("break".into(), Some("b1".into()));
+
+        state.breakout_rooms.lock().unwrap().insert(
+            "b1".into(),
+            BreakoutRoom { id: "b1".into(), name: "Room 1".into() },
+        );
+
+        // A missed `VideoStopped` must be repaired even when nothing is shared,
+        // otherwise a stale video stays pinned on the client.
+        let msgs = lag_resync_messages(&state, None);
+        assert!(
+            msgs.iter().any(|m| matches!(m, ServerMessage::VideoStopped)),
+            "resync must always carry the current shared-video state"
+        );
+
+        // Participant list is scoped: main-room recovery sees only "main".
+        let list = msgs.iter().find_map(|m| match m {
+            ServerMessage::ParticipantList(list) => Some(list.clone()),
+            _ => None,
+        });
+        let ids: Vec<String> = list.expect("participant list").into_iter().map(|p| p.id).collect();
+        assert_eq!(ids, vec!["main".to_string()]);
+
+        // The breakout-room participant's recovery is scoped to their room.
+        let msgs_break = lag_resync_messages(&state, Some("b1".into()));
+        let list = msgs_break.iter().find_map(|m| match m {
+            ServerMessage::ParticipantList(list) => Some(list.clone()),
+            _ => None,
+        });
+        let ids: Vec<String> = list.expect("participant list").into_iter().map(|p| p.id).collect();
+        assert_eq!(ids, vec!["break".to_string()]);
+    }
+
+    #[test]
+    fn lag_resync_includes_chat_polls_whiteboard_and_rooms() {
+        let state = create_mock_state();
+
+        state.chat_history.lock().unwrap().push(shared::ChatMessage {
+            user_id: "u".into(),
+            content: "hi".into(),
+            recipient_id: None,
+            timestamp: 1,
+            attachment: None,
+            room_id: None,
+        });
+        state.polls.lock().unwrap().insert(
+            "p1".into(),
+            Poll {
+                id: "p1".into(),
+                question: "?".into(),
+                options: Vec::new(),
+                voters: std::collections::HashSet::new(),
+                is_closed: false,
+                created_seq: 1,
+            },
+        );
+        state.whiteboard.lock().unwrap().push(shared::DrawAction {
+            color: "#000".into(),
+            width: 1.0,
+            start_x: 0.0,
+            start_y: 0.0,
+            end_x: 1.0,
+            end_y: 1.0,
+            sender_id: "u".into(),
+            rev: 1,
+        });
+        state.breakout_rooms.lock().unwrap().insert(
+            "b1".into(),
+            BreakoutRoom { id: "b1".into(), name: "Room 1".into() },
+        );
+        *state.shared_video_url.lock().unwrap() = Some("https://v".into());
+
+        let msgs = lag_resync_messages(&state, None);
+        assert!(msgs.iter().any(|m| matches!(m, ServerMessage::ChatHistory(h) if h.len() == 1)));
+        assert!(msgs.iter().any(|m| matches!(m, ServerMessage::PollsList(p) if p.len() == 1)));
+        assert!(msgs.iter().any(|m| matches!(m, ServerMessage::WhiteboardHistory(w) if w.len() == 1)));
+        assert!(msgs.iter().any(|m| matches!(m, ServerMessage::BreakoutRoomsList(r) if r.len() == 1)));
+        assert!(msgs.iter().any(|m| matches!(m, ServerMessage::VideoShared(u) if u == "https://v")));
     }
 }

@@ -86,30 +86,20 @@ test.describe('Whiteboard', () => {
     const EXTRA = 50;
 
     const result = await page.evaluate(async ({ cap, extra }) => {
-      const joinSnapshot = (socket: WebSocket) => new Promise<unknown[]>((resolve) => {
-        socket.onmessage = (e) => {
-          const msg = JSON.parse(String(e.data));
-          if (msg.type === 'WhiteboardHistory') resolve(msg.payload);
+      const join = (socket: WebSocket, name: string) => new Promise<void>((resolve, reject) => {
+        socket.onopen = () => {
+          socket.send(JSON.stringify({ type: 'Join', payload: { name, is_visitor: false } }));
+          resolve();
         };
+        socket.onerror = () => reject(new Error('socket failed'));
       });
 
       const drawer = new WebSocket(`ws://${location.host}/ws/chat`);
-      let perDrawHistory = 0;
-      let evictionMessages = 0;
-      drawer.onmessage = (e) => {
-        const msg = JSON.parse(String(e.data));
-        if (msg.type === 'WhiteboardHistory') perDrawHistory++;
-        else if (msg.type === 'WhiteboardEvicted') evictionMessages++;
-      };
-      await new Promise<void>((resolve, reject) => {
-        drawer.onopen = () => resolve();
-        drawer.onerror = () => reject(new Error('drawer socket failed'));
-      });
-
-      drawer.send(JSON.stringify({ type: 'Join', payload: { name: 'Drawer', is_visitor: false } }));
+      await join(drawer, 'Drawer');
+      // Let the join handshake settle before flooding.
       await new Promise((r) => setTimeout(r, 500));
 
-      const draw = (i: number) => drawer.send(JSON.stringify({
+      const draw = (socket: WebSocket, i: number) => socket.send(JSON.stringify({
         type: 'Draw',
         payload: {
           color: '#000000',
@@ -122,39 +112,69 @@ test.describe('Whiteboard', () => {
         },
       }));
 
+      // Flood well past the cap. The drawer's own broadcast receiver lags here,
+      // so we do NOT rely on observing its messages; correctness is proven from
+      // a fresh, idle observer below.
       for (let i = 0; i < cap + extra; i++) {
-        draw(i);
+        draw(drawer, i);
         if (i % 500 === 0) await new Promise((r) => setTimeout(r, 0));
       }
       await new Promise((r) => setTimeout(r, 3000));
-      drawer.close();
 
+      // A fresh observer cannot be lagging, so what it sees is authoritative.
       const observer = new WebSocket(`ws://${location.host}/ws/chat`);
-      const historyPromise = joinSnapshot(observer);
-      await new Promise<void>((resolve, reject) => {
-        observer.onopen = () => resolve();
-        observer.onerror = () => reject(new Error('observer socket failed'));
+      const seen: string[] = [];
+      let snapshot: Array<{ start_x: number }> = [];
+      let evicted = 0;
+      let snapshotsAfterJoin = 0;
+      let joined = false;
+      const gotSnapshot = new Promise<void>((resolve) => {
+        observer.onmessage = (e) => {
+          const msg = JSON.parse(String(e.data));
+          seen.push(msg.type);
+          if (msg.type === 'WhiteboardHistory') {
+            if (!joined) {
+              snapshot = msg.payload;
+              joined = true;
+              resolve();
+            } else {
+              snapshotsAfterJoin++;
+            }
+          } else if (msg.type === 'WhiteboardEvicted') {
+            evicted += msg.payload.count;
+          }
+        };
       });
-      observer.send(JSON.stringify({ type: 'Join', payload: { name: 'Observer', is_visitor: false } }));
-      const history = await historyPromise as Array<{ start_x: number }>;
+      await join(observer, 'Observer');
+      await gotSnapshot;
+
+      // Exactly one more stroke past the cap: the observer must see the stroke
+      // and a single-count eviction notice — never a full-history re-broadcast.
+      const before = seen.length;
+      draw(drawer, cap + extra);
+      await new Promise((r) => setTimeout(r, 1000));
+      const afterJoinTypes = seen.slice(before);
+
+      drawer.close();
       observer.close();
 
-      return { perDrawHistory, evictionMessages, history };
+      return { snapshot, evicted, snapshotsAfterJoin, afterJoinTypes };
     }, { cap: CAP, extra: EXTRA });
 
     await context.close();
 
-    // Eviction must have happened (otherwise a slow run that never reached the
-    // cap would pass without exercising the eviction path).
-    expect(result.evictionMessages).toBeGreaterThan(0);
-    // Snapshots, if any, come only from the throttled lag-resync path, never
-    // one-per-draw: strictly fewer than the number of evicting draws.
-    expect(result.perDrawHistory).toBeLessThan(EXTRA);
-
     // Deterministic proof the server capped its history: a fresh join snapshot
     // must carry exactly the cap, and its oldest stroke must be the 50th draw
     // (i = EXTRA), proving the first EXTRA strokes were evicted.
-    expect(result.history.length).toBe(CAP);
-    expect(result.history[0].start_x).toBe(EXTRA % 100);
+    expect(result.snapshot.length).toBe(CAP);
+    expect(result.snapshot[0].start_x).toBe(EXTRA % 100);
+
+    // One draw past the cap emits exactly one single-stroke eviction notice and
+    // no full-history snapshot, so the server is not re-sending the whole
+    // whiteboard per stroke.
+    expect(result.evicted).toBe(1);
+    expect(result.snapshotsAfterJoin).toBe(0);
+    expect(result.afterJoinTypes).toContain('Draw');
+    expect(result.afterJoinTypes).not.toContain('WhiteboardHistory');
   });
 });
