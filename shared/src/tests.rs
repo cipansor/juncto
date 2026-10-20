@@ -396,3 +396,44 @@ fn test_draw_serialization() {
     let deserialized: ClientMessage = serde_json::from_str(&json).unwrap();
     assert_eq!(msg, deserialized);
 }
+
+#[test]
+fn test_is_valid_css_hex_color_accepts_hex_literals() {
+    for valid in ["#fff", "#FFF", "#ffffff", "#0a1B2c", "#11223344"] {
+        assert!(is_valid_css_hex_color(valid), "{valid} should be valid");
+    }
+}
+
+#[test]
+fn test_is_valid_css_hex_color_rejects_non_hex() {
+    for invalid in [
+        "",
+        "fff",
+        "#",
+        "#12",
+        "#12345",
+        "#gggggg",
+        "red",
+        "var(--x)",
+        "url(https://evil.example/x)",
+        "#fff; background: url(https://evil.example/x)",
+        "#fff\r\nX: y",
+    ] {
+        assert!(
+            !is_valid_css_hex_color(invalid),
+            "{invalid} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn test_is_valid_logo_url() {
+    assert!(is_valid_logo_url("https://example.com/logo.png"));
+    assert!(!is_valid_logo_url("http://example.com/logo.png"));
+    assert!(!is_valid_logo_url("javascript:alert(1)"));
+    assert!(!is_valid_logo_url("data:image/svg+xml,<svg/>"));
+    assert!(!is_valid_logo_url("/relative/logo.png"));
+    assert!(!is_valid_logo_url(""));
+    let too_long = format!("https://example.com/{}", "a".repeat(2100));
+    assert!(!is_valid_logo_url(&too_long));
+}

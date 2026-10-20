@@ -2,6 +2,11 @@ use crate::AppState;
 use shared::{DrawAction, ServerMessage};
 use std::sync::Arc;
 
+/// Maximum number of whiteboard strokes retained in the in-memory history.
+/// Older strokes are evicted so a client cannot grow server memory without
+/// bound by drawing indefinitely.
+pub const MAX_WHITEBOARD_STROKES: usize = 10_000;
+
 pub fn process_draw_action(
     user_id: &str,
     mut action: DrawAction,
@@ -11,6 +16,10 @@ pub fn process_draw_action(
     {
         let mut wb = state.whiteboard.lock().unwrap();
         wb.push(action.clone());
+        let excess = wb.len().saturating_sub(MAX_WHITEBOARD_STROKES);
+        if excess > 0 {
+            wb.drain(0..excess);
+        }
     }
     ServerMessage::Draw(action)
 }
@@ -44,6 +53,7 @@ mod tests {
             unmute_permissions: Arc::new(Mutex::new(std::collections::HashSet::new())),
             camera_permissions: Arc::new(Mutex::new(std::collections::HashSet::new())),
             feedback_timestamps: Arc::new(Mutex::new(HashMap::new())),
+            admin_token: None,
         })
     }
 
@@ -73,5 +83,31 @@ mod tests {
         let wb = state.whiteboard.lock().unwrap();
         assert_eq!(wb.len(), 1);
         assert_eq!(wb[0].sender_id, "user1");
+    }
+
+    #[test]
+    fn test_whiteboard_history_is_bounded() {
+        let state = create_mock_state();
+        for i in 0..(MAX_WHITEBOARD_STROKES + 10) {
+            let action = DrawAction {
+                color: "#000".to_string(),
+                width: 2.0,
+                start_x: i as f64,
+                start_y: 0.0,
+                end_x: i as f64,
+                end_y: 10.0,
+                sender_id: "".to_string(),
+            };
+            process_draw_action("user1", action, &state);
+        }
+
+        let wb = state.whiteboard.lock().unwrap();
+        assert_eq!(wb.len(), MAX_WHITEBOARD_STROKES);
+        // Oldest strokes evicted, newest kept.
+        assert_eq!(
+            wb.last().unwrap().start_x,
+            (MAX_WHITEBOARD_STROKES + 9) as f64
+        );
+        assert_eq!(wb.first().unwrap().start_x, 10.0);
     }
 }

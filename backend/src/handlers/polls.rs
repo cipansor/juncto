@@ -2,6 +2,10 @@ use crate::AppState;
 use shared::{Poll, ServerMessage};
 use std::sync::Arc;
 
+/// Maximum number of polls retained in the in-memory room state. Older polls
+/// are evicted so the host cannot grow server memory without bound.
+pub const MAX_POLLS: usize = 200;
+
 pub fn create_poll(
     user_id: &str,
     mut poll: Poll,
@@ -23,6 +27,15 @@ pub fn create_poll(
     {
         let mut polls = state.polls.lock().unwrap();
         polls.insert(poll.id.clone(), poll.clone());
+        // Evict the oldest poll(s) once the cap is reached. HashMap iteration
+        // order is unspecified, so we simply remove arbitrary entries down to
+        // the limit; correctness does not depend on which poll is dropped.
+        while polls.len() > MAX_POLLS {
+            let Some(oldest) = polls.keys().next().cloned() else {
+                break;
+            };
+            polls.remove(&oldest);
+        }
     }
 
     Ok(ServerMessage::PollCreated(poll))
@@ -117,6 +130,7 @@ mod tests {
             unmute_permissions: Arc::new(Mutex::new(std::collections::HashSet::new())),
             camera_permissions: Arc::new(Mutex::new(std::collections::HashSet::new())),
             feedback_timestamps: Arc::new(Mutex::new(HashMap::new())),
+            admin_token: None,
         })
     }
 
@@ -145,6 +159,29 @@ mod tests {
         } else {
             panic!("Wrong message type");
         }
+    }
+
+    #[test]
+    fn test_polls_are_bounded() {
+        let state = create_mock_state();
+        let user_id = "host";
+        {
+            let mut config = state.room_config.lock().unwrap();
+            config.host_id = Some(user_id.to_string());
+        }
+
+        for i in 0..(MAX_POLLS + 5) {
+            let poll = Poll {
+                id: format!("poll-{i}"),
+                question: format!("Q{i}"),
+                options: vec![],
+                voters: std::collections::HashSet::new(),
+                is_closed: false,
+            };
+            assert!(create_poll(user_id, poll, &state).is_ok());
+        }
+
+        assert_eq!(state.polls.lock().unwrap().len(), MAX_POLLS);
     }
 
     #[test]

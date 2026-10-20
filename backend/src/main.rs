@@ -45,6 +45,11 @@ pub struct AppState {
     pub camera_permissions: Arc<Mutex<HashSet<String>>>,
     /// Rate limiting for feedback: tracks timestamps of submissions per user/IP
     pub feedback_timestamps: Arc<Mutex<HashMap<String, Vec<std::time::Instant>>>>,
+    /// Shared secret required to reset the global room via `POST /api/rooms`.
+    /// Read from `ROOM_ADMIN_TOKEN`; when unset the endpoint is disabled, so a
+    /// self-hosted deployment is not trivially disrupted by any anonymous
+    /// network client.
+    pub admin_token: Option<String>,
 }
 
 #[tokio::main]
@@ -76,6 +81,11 @@ async fn main() {
     let unmute_permissions = Arc::new(Mutex::new(HashSet::new()));
     let camera_permissions = Arc::new(Mutex::new(HashSet::new()));
     let feedback_timestamps = Arc::new(Mutex::new(HashMap::new()));
+    // Optional shared secret for the room-reset endpoint. Absent (the default)
+    // means the endpoint stays disabled rather than open.
+    let admin_token = std::env::var("ROOM_ADMIN_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
 
     let app_state = Arc::new(AppState {
         tx,
@@ -95,6 +105,7 @@ async fn main() {
         unmute_permissions,
         camera_permissions,
         feedback_timestamps,
+        admin_token,
     });
 
     // Resolve served paths against the crate manifest dir so the binary works

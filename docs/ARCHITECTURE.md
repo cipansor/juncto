@@ -113,6 +113,12 @@ Notable server-side rules:
   2048 characters; an invalid value is dropped rather than rejecting the join.
 * **Capacity.** `max_participants` is enforced while the participants lock is held, so
   concurrent joins cannot overshoot the limit.
+* **Room reset.** `POST /api/rooms` replaces the global room configuration and clears all
+  live state, so it requires the bearer token from `ROOM_ADMIN_TOKEN`. The endpoint is
+  disabled while that variable is unset.
+* **Bounded state.** Chat history, whiteboard strokes and polls are capped (oldest entries
+  are evicted) and inbound WebSocket messages are size-limited, so a single client cannot
+  exhaust server memory by sending indefinitely.
 
 ### `frontend` — the client
 

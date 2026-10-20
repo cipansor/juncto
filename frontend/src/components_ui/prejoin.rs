@@ -271,6 +271,7 @@ pub fn PrejoinScreen(
                         type="text"
                         id="display-name"
                         class="styled-input"
+                        maxlength="64"
                         on:input=move |ev| set_display_name.set(event_target_value(&ev))
                         prop:value=move || display_name.get()
                         placeholder="Enter your name"

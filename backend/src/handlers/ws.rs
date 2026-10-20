@@ -20,11 +20,18 @@ use shared::{ClientMessage, Participant, RoomConfig, ServerMessage};
 use std::sync::Arc;
 use tracing;
 
+/// Upper bound on a single inbound WebSocket message. axum already defaults to
+/// 64 MiB, but that is far larger than any legitimate client message and lets a
+/// single frame carry a multi-megabyte payload, so we set an explicit, tighter
+/// limit.
+const MAX_WS_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
 pub async fn chat_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
+        .on_upgrade(|socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
@@ -273,6 +280,28 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             room_config_mutex.lock().unwrap().host_id == Some(uid.clone())
                                         };
                                         if is_host {
+                                            // Colours are written straight into CSS custom
+                                            // properties on every participant's client and the
+                                            // logo into an <img src>, so validate both before
+                                            // accepting them: only hex colours and https URLs.
+                                            if let Some(ref color) = branding.primary_color
+                                                && !shared::is_valid_css_hex_color(color)
+                                            {
+                                                let _ = internal_tx.send(ServerMessage::Error("Invalid primary color: expected a hex value like #RRGGBB".to_string())).await;
+                                                continue;
+                                            }
+                                            if let Some(ref color) = branding.background_color
+                                                && !shared::is_valid_css_hex_color(color)
+                                            {
+                                                let _ = internal_tx.send(ServerMessage::Error("Invalid background color: expected a hex value like #RRGGBB".to_string())).await;
+                                                continue;
+                                            }
+                                            if let Some(ref logo) = branding.logo_url
+                                                && !shared::is_valid_logo_url(logo)
+                                            {
+                                                let _ = internal_tx.send(ServerMessage::Error("Invalid logo URL: must start with https://".to_string())).await;
+                                                continue;
+                                            }
                                             let new_config = {
                                                 let mut config = room_config_mutex.lock().unwrap();
                                                 config.branding = branding;
@@ -734,6 +763,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                 },
                                 ClientMessage::Join { name, is_visitor, avatar_url, password } => {
                                     if my_id.is_some() || knocking_id.is_some() { continue; } // Already joined or knocking
+
+                                    // Cap the display name so a client cannot bloat
+                                    // every participant's roster with an unbounded string.
+                                    if name.chars().count() > shared::MAX_PARTICIPANT_NAME_LEN {
+                                        let _ = internal_tx.send(ServerMessage::Error("Name too long".to_string())).await;
+                                        continue;
+                                    }
 
                                     // Sanitize avatar URL on join: since `avatar_url` is an
                                     // optional cosmetic field, an invalid value should not
@@ -1335,6 +1371,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                 },
                                 ClientMessage::UpdateProfile(new_name) => {
                                     if let Some(uid) = &my_id {
+                                        // Same cap as `Join`: reject over-long renames
+                                        // rather than storing/broadcasting them.
+                                        if new_name.chars().count() > shared::MAX_PARTICIPANT_NAME_LEN {
+                                            let _ = internal_tx.send(ServerMessage::Error("Name too long".to_string())).await;
+                                            continue;
+                                        }
                                         let updated_participant = {
                                             let mut participants = participants_mutex.lock().unwrap();
                                             if let Some(p) = participants.get_mut(uid) {

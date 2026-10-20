@@ -1,17 +1,46 @@
 use crate::AppState;
 use axum::{
     extract::{Json, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use serde_json::json;
 use shared::RoomConfig;
 use std::sync::Arc;
 
+/// Constant-time comparison so the admin-token check does not leak the token
+/// length or content through response timing.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        diff |= (a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0)) as usize;
+    }
+    diff == 0
+}
+
 pub async fn create_room(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<RoomConfig>,
 ) -> impl IntoResponse {
+    // Resetting the single global room wipes every participant, message and
+    // stroke, so it must not be reachable anonymously. The endpoint is
+    // disabled entirely unless `ROOM_ADMIN_TOKEN` is configured; when it is,
+    // callers must present the matching bearer token.
+    let authorized = match state.admin_token.as_deref() {
+        Some(expected) => headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|provided| constant_time_eq(provided, expected)),
+        None => false,
+    };
+    if !authorized {
+        let err = json!({ "error": "Unauthorized" });
+        return (StatusCode::UNAUTHORIZED, Json(err)).into_response();
+    }
+
     // Mirror the validation enforced by the WebSocket `SetSubject` handler
     // so the REST endpoint cannot be used to bypass the 256-character limit.
     // Use `chars().count()` (not byte length) so multi-byte UTF-8 content
@@ -20,6 +49,18 @@ pub async fn create_room(
         && s.chars().count() > 256
     {
         let err = json!({ "error": "Invalid subject: too long" });
+        return (StatusCode::BAD_REQUEST, Json(err)).into_response();
+    }
+
+    if payload.room_name.chars().count() > 128 {
+        let err = json!({ "error": "Invalid room name: too long" });
+        return (StatusCode::BAD_REQUEST, Json(err)).into_response();
+    }
+
+    // A zero (or absurd) capacity would otherwise lock every participant out
+    // of the room, which is indistinguishable from a denial of service.
+    if payload.max_participants == 0 || payload.max_participants > 1000 {
+        let err = json!({ "error": "Invalid max_participants: must be between 1 and 1000" });
         return (StatusCode::BAD_REQUEST, Json(err)).into_response();
     }
 
@@ -105,11 +146,9 @@ mod tests {
     use std::sync::Mutex;
     use tower::ServiceExt;
 
-    #[tokio::test]
-    async fn test_create_room() {
-        use shared::RoomConfig;
+    fn build_state(admin_token: Option<String>) -> Arc<AppState> {
         let (tx, _rx) = tokio::sync::broadcast::channel(100);
-        let app_state = Arc::new(AppState {
+        Arc::new(AppState {
             tx,
             participants: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             knocking_participants: Arc::new(
@@ -135,29 +174,98 @@ mod tests {
             unmute_permissions: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             camera_permissions: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             feedback_timestamps: Arc::new(Mutex::new(HashMap::new())),
-        });
+            admin_token,
+        })
+    }
 
-        let config = RoomConfig {
+    fn app(state: Arc<AppState>) -> Router {
+        Router::new()
+            .route("/api/rooms", post(create_room))
+            .with_state(state)
+    }
+
+    fn request(body: serde_json::Value, token: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder()
+            .uri("/api/rooms")
+            .method("POST")
+            .header("Content-Type", "application/json");
+        if let Some(token) = token {
+            builder = builder.header("Authorization", format!("Bearer {token}"));
+        }
+        builder
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap()
+    }
+
+    fn valid_body() -> serde_json::Value {
+        serde_json::to_value(RoomConfig {
             e2ee_enabled: true,
             ..Default::default()
-        };
-        // Mock app with just this route for testing
-        let app = Router::new()
-            .route("/api/rooms", post(create_room))
-            .with_state(app_state);
+        })
+        .unwrap()
+    }
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/rooms")
-                    .method("POST")
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(serde_json::to_string(&config).unwrap()))
-                    .unwrap(),
-            )
+    #[tokio::test]
+    async fn test_create_room_with_valid_token() {
+        let state = build_state(Some("secret".to_string()));
+        let response = app(state)
+            .oneshot(request(valid_body(), Some("secret")))
             .await
             .unwrap();
-
         assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_create_room_without_token_is_unauthorized() {
+        let state = build_state(Some("secret".to_string()));
+        let response = app(state)
+            .oneshot(request(valid_body(), None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_create_room_with_wrong_token_is_unauthorized() {
+        let state = build_state(Some("secret".to_string()));
+        let response = app(state)
+            .oneshot(request(valid_body(), Some("guess")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_create_room_disabled_when_token_unset() {
+        let state = build_state(None);
+        let response = app(state)
+            .oneshot(request(valid_body(), Some("secret")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_create_room_rejects_zero_max_participants() {
+        let state = build_state(Some("secret".to_string()));
+        let mut body = valid_body();
+        body["max_participants"] = serde_json::json!(0);
+        let response = app(state)
+            .oneshot(request(body, Some("secret")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_create_room_rejects_overlong_room_name() {
+        let state = build_state(Some("secret".to_string()));
+        let mut body = valid_body();
+        body["room_name"] = serde_json::json!("a".repeat(129));
+        let response = app(state)
+            .oneshot(request(body, Some("secret")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

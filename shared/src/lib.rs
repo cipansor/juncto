@@ -556,5 +556,34 @@ pub fn is_giphy_cdn_url(url: &str) -> bool {
     }
 }
 
+/// Maximum length (in Unicode scalar values) accepted for a participant
+/// display name. Enforced by the backend on `Join` and `UpdateProfile`, and
+/// mirrored by the client so users get immediate feedback.
+pub const MAX_PARTICIPANT_NAME_LEN: usize = 64;
+
+/// Returns `true` if `value` is a CSS colour literal that is safe to assign to
+/// a CSS custom property: `#rgb`, `#rrggbb` or `#rrggbbaa` hex.
+///
+/// Branding colours arrive from a client and are written straight into
+/// `--primary-color` / `--background-color`, so anything that is not a plain
+/// hex literal (a `url(...)`, a `;`-separated declaration, `var(...)`, …) must
+/// be rejected rather than forwarded to every participant's stylesheet.
+pub fn is_valid_css_hex_color(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix('#') else {
+        return false;
+    };
+    matches!(hex.len(), 3 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Returns `true` if `url` is an acceptable branding logo URL: an absolute
+/// `https://` URL of at most 2048 characters.
+///
+/// Mirrors the avatar-URL rules so a host cannot make other participants'
+/// browsers issue `http://` (mixed-content / tracking) or other-scheme
+/// requests through `SetBranding`.
+pub fn is_valid_logo_url(url: &str) -> bool {
+    url.starts_with("https://") && url.len() <= 2048
+}
+
 #[cfg(test)]
 mod tests;
