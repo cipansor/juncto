@@ -96,6 +96,24 @@ fn lag_resync_messages(state: &Arc<AppState>, room_id: Option<String>) -> Vec<Se
     msgs
 }
 
+/// Whether a chat message should still be delivered to a socket. Public
+/// main-room messages are the only ones retained server-side; a room reset
+/// clears that history, so a stale pre-reset `Chat` still queued in a socket's
+/// broadcast buffer must be dropped rather than replayed after the resync
+/// `ChatHistory` already cleared it. Breakout-room and private messages are not
+/// retained and are always deliverable.
+fn chat_is_deliverable(state: &Arc<AppState>, message: &shared::ChatMessage) -> bool {
+    if message.recipient_id.is_some() || message.room_id.is_some() {
+        return true;
+    }
+    state
+        .chat_history
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|m| m.id == message.id)
+}
+
 pub async fn chat_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
@@ -1064,7 +1082,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                             } else if let Some(target) = &message.recipient_id {
                                                                 *target == my_id_clone || message.user_id == my_id_clone // Must echo private message back to self
                                                             } else {
-                                                                true
+                                                                // Drop a retained-but-cleared public
+                                                                // message replayed from the buffer.
+                                                                chat_is_deliverable(&state_for_task, message)
                                                             }
                                                         },
                                                         ServerMessage::PeerTyping { room_id, .. } => {
@@ -2081,7 +2101,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                     } else if let Some(target) = &message.recipient_id {
                                                         *target == my_id_clone || message.user_id == my_id_clone // Must echo private message back to self
                                                     } else {
-                                                        true
+                                                        // Drop a retained-but-cleared public
+                                                        // message replayed from the buffer.
+                                                        chat_is_deliverable(&state_for_task, message)
                                                     }
                                                 },
                                                 ServerMessage::PeerTyping { room_id, .. } => {
@@ -2646,5 +2668,46 @@ mod tests {
                 .any(|m| matches!(m, ServerMessage::RoomUpdated(_))),
             "resync must carry the current room config"
         );
+    }
+
+    #[test]
+    fn public_chat_not_in_history_is_dropped() {
+        // A stale pre-reset public message still queued in the broadcast buffer
+        // must not be replayed after the resync cleared the history.
+        let state = create_mock_state();
+        let stale = shared::ChatMessage {
+            id: "old".into(),
+            user_id: "u".into(),
+            content: "from the previous room".into(),
+            recipient_id: None,
+            timestamp: 1,
+            attachment: None,
+            room_id: None,
+        };
+        assert!(!chat_is_deliverable(&state, &stale));
+
+        // Once a message is retained, it is deliverable again.
+        let retained = shared::ChatMessage {
+            id: "new".into(),
+            ..stale.clone()
+        };
+        state.chat_history.lock().unwrap().push(retained.clone());
+        assert!(chat_is_deliverable(&state, &retained));
+
+        // Private and breakout messages are never retained; always deliverable.
+        assert!(chat_is_deliverable(
+            &state,
+            &shared::ChatMessage {
+                recipient_id: Some("peer".into()),
+                ..stale.clone()
+            }
+        ));
+        assert!(chat_is_deliverable(
+            &state,
+            &shared::ChatMessage {
+                room_id: Some("breakout".into()),
+                ..stale.clone()
+            }
+        ));
     }
 }
