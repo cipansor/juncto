@@ -1,7 +1,7 @@
-use crate::media::{
+use crate::state::JoinOptions;
+use browser_media::{
     AudioMonitor, DeviceInfo, get_audio_input_devices, get_user_media, get_video_input_devices,
 };
-use crate::state::JoinOptions;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
