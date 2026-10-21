@@ -54,6 +54,26 @@ fn extension_for(mime_type: &str) -> &str {
         .unwrap_or("webm")
 }
 
+/// Container to label a finished recording with, given the type the recorder
+/// settled on and the type the browser stamped on the produced chunks. `None`
+/// means neither gave evidence, and the caller must not claim a container.
+fn resolve_recorded_mime(settled: Option<String>, chunk_type: Option<String>) -> Option<String> {
+    // Each source must be filtered before falling through, so an empty settled
+    // type still lets the chunk type have its say.
+    settled
+        .filter(|t| !t.is_empty())
+        .or(chunk_type.filter(|t| !t.is_empty()))
+}
+
+/// Extension for the downloaded file. Falls back to `bin` when no container
+/// could be determined, so the name never claims a format we did not verify.
+fn download_extension(recorded: Option<&str>) -> &str {
+    match recorded {
+        Some(m) => extension_for(m),
+        None => "bin",
+    }
+}
+
 /// Records a [`MediaStream`] and, on stop, downloads the result as a file.
 ///
 /// Dropping the recorder stops an in-flight recording; the `onstop` handler
@@ -74,9 +94,10 @@ impl LocalRecorder {
     ///
     /// The mime type is chosen from the stream's own tracks, so an audio-only
     /// stream records as `audio/webm` rather than being handed a video codec it
-    /// cannot use. The downloaded file is named
-    /// `recording-<timestamp>.<ext>`, where `<ext>` follows the format the
-    /// browser actually produced; change the stem with
+    /// cannot use. The container is confirmed from the recorder after it starts,
+    /// so the blob label and the file extension describe the format that was
+    /// really produced, even when the browser picks its own. The downloaded file
+    /// is named `recording-<timestamp>.<ext>`; change the stem with
     /// [`LocalRecorder::set_filename_prefix`].
     pub fn new(stream: MediaStream, on_error: impl Fn(String) + 'static) -> Result<Self, JsValue> {
         // The stream's own tracks decide which candidates make sense: preferring
@@ -93,39 +114,49 @@ impl LocalRecorder {
         let recorder =
             MediaRecorder::new_with_media_stream_and_media_recorder_options(&stream, &options)?;
 
-        // The browser may ignore the request and pick its own default, so read
-        // the effective type back. The container and the label on the finished
-        // blob have to agree, otherwise MIME-sensitive players misclassify it.
-        let mime_type = match recorder.mime_type() {
-            t if t.is_empty() => requested_mime.unwrap_or("video/webm").to_string(),
-            t => t,
-        };
-        let extension = extension_for(&mime_type).to_string();
-
         let chunks: Rc<RefCell<Vec<web_sys::Blob>>> = Rc::new(RefCell::new(Vec::new()));
         let filename_prefix = Rc::new(RefCell::new(DEFAULT_FILENAME_PREFIX.to_string()));
+        // The container is only known once recording has started, because
+        // `MediaRecorder.mimeType` is empty until then. `None` means no evidence
+        // yet, and while it stays `None` no container is claimed.
+        let recorded_mime: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
         let chunks_clone = chunks.clone();
+        let recorded_mime_data = recorded_mime.clone();
         let on_data_available = Closure::wrap(Box::new(move |e: BlobEvent| {
             if let Some(blob) = e.data()
                 && blob.size() > 0.0
             {
+                // Last resort: some browsers leave `mimeType` empty but still
+                // stamp the produced chunks with the container they chose.
+                if recorded_mime_data.borrow().is_none() {
+                    *recorded_mime_data.borrow_mut() =
+                        resolve_recorded_mime(None, Some(blob.type_()));
+                }
                 chunks_clone.borrow_mut().push(blob);
             }
         }) as Box<dyn FnMut(BlobEvent)>);
 
         let chunks_clone_2 = chunks.clone();
         let filename_prefix_clone = filename_prefix.clone();
-        let mime_type_clone = mime_type.clone();
-        let extension_clone = extension.clone();
+        let recorded_mime_stop = recorded_mime.clone();
         let on_stop = Closure::wrap(Box::new(move || {
             let blob_parts = js_sys::Array::new();
             for blob in chunks_clone_2.borrow().iter() {
                 blob_parts.push(blob);
             }
 
+            // Resolve the container at stop time: this is the first moment the
+            // type is authoritative, and it also lets the chunks have their say
+            // for browsers that leave `mimeType` empty.
+            let recorded = recorded_mime_stop.borrow().clone();
+            let extension = download_extension(recorded.as_deref());
+
             let property_bag = web_sys::BlobPropertyBag::new();
-            property_bag.set_type(&mime_type_clone);
+            // Only claim a type when there is evidence for one.
+            if let Some(mime_type) = recorded.as_deref() {
+                property_bag.set_type(mime_type);
+            }
             if let Ok(blob) =
                 web_sys::Blob::new_with_blob_sequence_and_options(&blob_parts, &property_bag)
                 && let Some(window) = web_sys::window()
@@ -142,7 +173,7 @@ impl LocalRecorder {
                     "{}-{}.{}",
                     filename_prefix_clone.borrow(),
                     js_sys::Date::now(),
-                    extension_clone
+                    extension
                 ));
                 a.click();
                 // Delay revoking the object URL so the browser has time
@@ -178,6 +209,15 @@ impl LocalRecorder {
 
         recorder.start_with_time_slice(5000)?; // 5s slices
 
+        // Read the effective type only after `start()`, because `mimeType` is
+        // empty before then. This is what makes the blob label and the file
+        // extension reflect the container the browser really produced instead of
+        // a guess; when the browser reports nothing, the value stays `None` and
+        // the chunks get their say in `on_data_available`.
+        if let Some(settled) = resolve_recorded_mime(Some(recorder.mime_type()), None) {
+            *recorded_mime.borrow_mut() = Some(settled);
+        }
+
         Ok(Self {
             recorder: SendWrapper::new(recorder),
             filename_prefix,
@@ -194,9 +234,9 @@ impl LocalRecorder {
     }
 
     /// The mime type the browser actually records with, as reported by
-    /// `MediaRecorder.mimeType` once recording has started. This is the type
-    /// used for the downloaded blob, so it reflects the real container even
-    /// when the browser ignored the requested one.
+    /// `MediaRecorder.mimeType`. Empty until recording has started, after which
+    /// it reflects the real container even when the browser ignored the
+    /// requested one. This is the type used for the downloaded blob.
     pub fn mime_type(&self) -> String {
         self.recorder.mime_type()
     }
@@ -299,5 +339,41 @@ mod tests {
         assert_eq!(extension_for("video/mp4"), "mp4");
         // A malformed type must not produce an empty extension.
         assert_eq!(extension_for(""), "webm");
+    }
+
+    #[test]
+    fn settled_type_wins_over_the_chunk_type() {
+        assert_eq!(
+            resolve_recorded_mime(Some("audio/mp4".into()), Some("video/webm".into())),
+            Some("audio/mp4".to_string())
+        );
+    }
+
+    #[test]
+    fn chunk_type_is_used_when_the_recorder_reports_nothing() {
+        assert_eq!(
+            resolve_recorded_mime(Some(String::new()), Some("audio/mp4".into())),
+            Some("audio/mp4".to_string())
+        );
+    }
+
+    /// With no evidence from either source the container must stay unknown, so
+    /// the caller does not label an MP4 recording as `video/webm`.
+    #[test]
+    fn no_evidence_yields_no_container() {
+        assert_eq!(resolve_recorded_mime(None, None), None);
+        assert_eq!(resolve_recorded_mime(Some(String::new()), None), None);
+        assert_eq!(
+            resolve_recorded_mime(Some(String::new()), Some(String::new())),
+            None
+        );
+    }
+
+    /// An unknown container must not be presented as a WebM file.
+    #[test]
+    fn unknown_container_downloads_as_bin() {
+        assert_eq!(download_extension(None), "bin");
+        assert_eq!(download_extension(Some("audio/mp4")), "mp4");
+        assert_eq!(download_extension(Some("audio/webm;codecs=opus")), "webm");
     }
 }

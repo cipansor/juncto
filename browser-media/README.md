@@ -68,9 +68,17 @@ be re-implemented incorrectly:
 * **Recordings download reliably.** The object URL is revoked on a timer rather
   than immediately after `click()`, because revoking synchronously breaks the
   download in some browsers.
-* **Recording codecs are negotiated.** `LocalRecorder` picks the first supported
-  entry of `video/webm;codecs=vp9,opus`, `vp8,opus`, `video/webm`, `audio/webm`
-  instead of assuming VP8 support.
+* **Recording codecs are negotiated per stream.** `LocalRecorder` keeps separate
+  candidate lists and picks from the one that matches the stream: a stream with a
+  video track tries `video/webm;codecs=vp9,opus`, `video/webm;codecs=vp8,opus`,
+  then `video/webm`; an audio-only stream tries `audio/webm;codecs=opus` then
+  `audio/webm`. Asking for a video codec on an audio-only stream makes browsers
+  reject the configuration even when they support `audio/webm`.
+* **The downloaded file describes what was recorded.** The container is read back
+  from the recorder after it starts, not assumed, so an audio-only recording is
+  labelled `audio/*` rather than `video/webm`. If the browser reports no type at
+  all, the chunks are asked instead, and if neither answers, the file keeps its
+  bytes and gets a `.bin` extension rather than a container we cannot vouch for.
 
 ## Warning conditions
 

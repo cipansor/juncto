@@ -336,6 +336,10 @@ async fn downloaded_blob_is_labelled_with_the_recorded_type() {
 
     let recorder = LocalRecorder::new(stream.clone(), |_| {}).expect("LocalRecorder::new failed");
     let recorded_mime = recorder.mime_type();
+    assert!(
+        !recorded_mime.is_empty(),
+        "the mime type must be known once recording has started"
+    );
 
     sleep_ms(300).await;
     recorder.stop();
