@@ -89,6 +89,7 @@ mod tests {
         let owner = Owner::new();
         owner.set();
         let m1 = ChatMessage {
+            id: String::new(),
             user_id: "u1".to_string(),
             content: "hello".to_string(),
             recipient_id: None,
@@ -97,6 +98,7 @@ mod tests {
             room_id: None,
         };
         let m2 = ChatMessage {
+            id: String::new(),
             user_id: "u2".to_string(),
             content: "here is a file".to_string(),
             recipient_id: None,

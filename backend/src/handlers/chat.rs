@@ -2,6 +2,12 @@ use crate::AppState;
 use shared::{ChatMessage, FileAttachment, ServerMessage};
 use std::sync::Arc;
 
+/// Maximum length (in Unicode scalar values) of a single chat message body.
+pub const MAX_CHAT_CONTENT_LEN: usize = 4000;
+
+/// Maximum size of a base64 file attachment carried by a chat message.
+pub const MAX_ATTACHMENT_BYTES: usize = 3 * 1024 * 1024;
+
 pub fn process_chat_message(
     user_id: &str,
     room_id: &Option<String>,
@@ -10,9 +16,13 @@ pub fn process_chat_message(
     attachment: Option<FileAttachment>,
     state: &Arc<AppState>,
 ) -> Result<ServerMessage, String> {
+    if content.chars().count() > MAX_CHAT_CONTENT_LEN {
+        return Err("Message too long".to_string());
+    }
+
     if let Some(att) = &attachment {
         // Limit 3MB
-        if att.content_base64.len() > 3 * 1024 * 1024 {
+        if att.content_base64.len() > MAX_ATTACHMENT_BYTES {
             return Err("File too large".to_string());
         }
     }
@@ -25,6 +35,7 @@ pub fn process_chat_message(
     }
 
     let chat_msg = ChatMessage {
+        id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         content,
         recipient_id: recipient_id.clone(),
@@ -37,6 +48,12 @@ pub fn process_chat_message(
     if recipient_id.is_none() && room_id.is_none() {
         let mut history = state.chat_history.lock().unwrap();
         history.push(chat_msg.clone());
+        // Ring-buffer semantics: drop the oldest entries once the cap is
+        // reached so memory stays bounded across the room's lifetime.
+        let excess = history.len().saturating_sub(shared::MAX_CHAT_HISTORY);
+        if excess > 0 {
+            history.drain(0..excess);
+        }
     }
 
     Ok(ServerMessage::Chat {
@@ -74,6 +91,9 @@ mod tests {
             unmute_permissions: Arc::new(Mutex::new(std::collections::HashSet::new())),
             camera_permissions: Arc::new(Mutex::new(std::collections::HashSet::new())),
             feedback_timestamps: Arc::new(Mutex::new(HashMap::new())),
+            poll_seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            whiteboard_rev: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            admin_token: None,
         })
     }
 
@@ -151,5 +171,33 @@ mod tests {
             process_chat_message("user1", &None, "file".to_string(), None, attachment, &state);
         assert!(res.is_err());
         assert_eq!(res.unwrap_err(), "File too large");
+    }
+
+    #[test]
+    fn test_process_chat_content_too_long() {
+        let state = create_mock_state();
+        let long = "a".repeat(MAX_CHAT_CONTENT_LEN + 1);
+        let res = process_chat_message("user1", &None, long, None, None, &state);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "Message too long");
+        assert!(state.chat_history.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_chat_history_is_bounded() {
+        let state = create_mock_state();
+        for i in 0..(shared::MAX_CHAT_HISTORY + 25) {
+            let res = process_chat_message("user1", &None, format!("msg {i}"), None, None, &state);
+            assert!(res.is_ok());
+        }
+
+        let history = state.chat_history.lock().unwrap();
+        assert_eq!(history.len(), shared::MAX_CHAT_HISTORY);
+        // Oldest messages were evicted, newest retained.
+        assert_eq!(
+            history.last().unwrap().content,
+            format!("msg {}", shared::MAX_CHAT_HISTORY + 24)
+        );
+        assert_eq!(history.first().unwrap().content, "msg 25");
     }
 }

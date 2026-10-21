@@ -5,7 +5,6 @@ use crate::dropbox::provide_dropbox_context;
 use crate::face_landmarks::{
     FaceLandmarksService, provide_face_landmarks_context, use_face_landmarks,
 };
-use crate::media::{AudioMonitor, get_display_media, get_user_media};
 use crate::remote_control::{
     RemoteControlService, provide_remote_control_context, use_remote_control,
 };
@@ -13,6 +12,9 @@ use crate::salesforce::provide_salesforce_context;
 use crate::state_handlers::{HandlerContext, handle_server_message};
 use crate::storage::{load_settings, update_setting};
 use crate::webrtc::WebRTCManager;
+use browser_media::{
+    AudioMonitor, LocalRecorder, VideoProcessor, get_display_media, get_user_media,
+};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use send_wrapper::SendWrapper;
@@ -69,6 +71,11 @@ pub struct RoomState {
     pub show_whiteboard: ReadSignal<bool>,
     pub show_etherpad: ReadSignal<bool>,
     pub whiteboard_history: ReadSignal<Vec<DrawAction>>,
+    pub whiteboard_reset: ReadSignal<u32>,
+    /// Monotonic count of strokes appended via `Draw`. The canvas uses it to
+    /// paint only the newly appended tail, which keeps incremental drawing
+    /// correct even though evictions trim the front of the history.
+    pub whiteboard_append: ReadSignal<u32>,
     pub my_id: ReadSignal<Option<String>>,
     pub typing_users: ReadSignal<HashSet<String>>,
     pub is_host: Signal<bool>,
@@ -247,6 +254,21 @@ pub fn use_room_state() -> RoomState {
     let (show_etherpad, set_show_etherpad) = signal(false);
     let (whiteboard_history, set_whiteboard_history) = signal(Vec::<DrawAction>::new());
     let (_last_draw_action, set_last_draw_action) = signal(None::<DrawAction>);
+    // Bumped when the canvas must clear and repaint from the retained history:
+    // on the join snapshot, and (throttled) after the server evicts strokes.
+    let (whiteboard_reset, set_whiteboard_reset) = signal(0u32);
+    // Monotonic count of strokes appended via `Draw`; lets the canvas paint only
+    // the new tail even though evictions trim the front of the history.
+    let (whiteboard_append, set_whiteboard_append) = signal(0u32);
+    // Throttle state for eviction-driven canvas rebuilds (see state_handlers).
+    let whiteboard_repaint_at: SendWrapper<Rc<RefCell<f64>>> =
+        SendWrapper::new(Rc::new(RefCell::new(0.0)));
+    let whiteboard_repaint_timer: SendWrapper<Rc<RefCell<Option<gloo_timers::callback::Timeout>>>> =
+        SendWrapper::new(Rc::new(RefCell::new(None)));
+    // Highest stroke `rev` seen, so strokes replayed after a resync snapshot
+    // (see the broadcast-lag path) are ignored instead of duplicated.
+    let whiteboard_max_rev: SendWrapper<Rc<RefCell<u64>>> =
+        SendWrapper::new(Rc::new(RefCell::new(0)));
     let (my_id, set_my_id) = signal(None::<String>);
     let (local_stream, set_local_stream) = signal(None::<MediaStream>);
     let (local_screen_stream, set_local_screen_stream) = signal(None::<MediaStream>);
@@ -292,13 +314,13 @@ pub fn use_room_state() -> RoomState {
     let (is_recording_locally, set_is_recording_locally) = signal(false);
     let (is_talking_while_muted, set_is_talking_while_muted) = signal(false);
     let (show_rejoin, set_show_rejoin) = signal(false);
-    let local_recorder: SendWrapper<Rc<RefCell<Option<crate::media_recorder::LocalRecorder>>>> =
+    let local_recorder: SendWrapper<Rc<RefCell<Option<LocalRecorder>>>> =
         SendWrapper::new(Rc::new(RefCell::new(None)));
     // Holds previously-stopped recorders whose async `onstop` callbacks may
     // not have fired yet. They are kept alive here so the wasm-bindgen
     // Closures remain valid until the browser event loop processes the stop
     // event. Entries are cleared each time a new recording starts.
-    let pending_recorders: SendWrapper<Rc<RefCell<Vec<crate::media_recorder::LocalRecorder>>>> =
+    let pending_recorders: SendWrapper<Rc<RefCell<Vec<LocalRecorder>>>> =
         SendWrapper::new(Rc::new(RefCell::new(Vec::new())));
     // Tracks the stream ID that the active LocalRecorder was created with.
     // Used by a reactive effect to detect when `local_stream` is replaced
@@ -345,7 +367,7 @@ pub fn use_room_state() -> RoomState {
 
     Effect::new({
         let prev_stream_id = prev_stream_id.clone();
-        move |prev_processor: Option<Option<crate::media::VideoProcessor>>| -> Option<crate::media::VideoProcessor> {
+        move |prev_processor: Option<Option<VideoProcessor>>| -> Option<VideoProcessor> {
             let mode = background_mode.get();
             let stream = raw_local_stream.get();
 
@@ -357,14 +379,17 @@ pub fn use_room_state() -> RoomState {
                     // resources. Only stop video tracks since audio tracks are shared
                     // references to the raw stream's tracks and must remain active.
                     if prev_processor.as_ref().is_some_and(|p| p.is_some())
-                        && let Some(old_processed) = local_stream.get_untracked() {
-                            let video_tracks = old_processed.get_video_tracks();
-                            for i in 0..video_tracks.length() {
-                                if let Ok(track) = video_tracks.get(i).dyn_into::<web_sys::MediaStreamTrack>() {
-                                    track.stop();
-                                }
+                        && let Some(old_processed) = local_stream.get_untracked()
+                    {
+                        let video_tracks = old_processed.get_video_tracks();
+                        for i in 0..video_tracks.length() {
+                            if let Ok(track) =
+                                video_tracks.get(i).dyn_into::<web_sys::MediaStreamTrack>()
+                            {
+                                track.stop();
                             }
                         }
+                    }
                     if let Some(Some(prev)) = prev_processor {
                         drop(prev);
                     }
@@ -379,29 +404,31 @@ pub fn use_room_state() -> RoomState {
                     };
                     *prev_stream_id.borrow_mut() = Some(s.id());
 
-                    if !stream_changed
-                        && let Some(Some(prev)) = prev_processor {
-                            // Same stream, only mode changed — update in-place instead of
-                            // recreating the canvas, video element, interval, and captureStream.
-                            prev.set_mode(mode);
-                            return Some(prev);
-                        }
+                    if !stream_changed && let Some(Some(prev)) = prev_processor {
+                        // Same stream, only mode changed — update in-place instead of
+                        // recreating the canvas, video element, interval, and captureStream.
+                        prev.set_mode(mode);
+                        return Some(prev);
+                    }
 
                     // Either the stream changed or no processor exists yet — (re)create.
                     // Stop old canvas video tracks before dropping the processor.
                     if prev_processor.as_ref().is_some_and(|p| p.is_some())
-                        && let Some(old_processed) = local_stream.get_untracked() {
-                            let video_tracks = old_processed.get_video_tracks();
-                            for i in 0..video_tracks.length() {
-                                if let Ok(track) = video_tracks.get(i).dyn_into::<web_sys::MediaStreamTrack>() {
-                                    track.stop();
-                                }
+                        && let Some(old_processed) = local_stream.get_untracked()
+                    {
+                        let video_tracks = old_processed.get_video_tracks();
+                        for i in 0..video_tracks.length() {
+                            if let Ok(track) =
+                                video_tracks.get(i).dyn_into::<web_sys::MediaStreamTrack>()
+                            {
+                                track.stop();
                             }
                         }
+                    }
                     if let Some(Some(prev)) = prev_processor {
                         drop(prev);
                     }
-                    match crate::media::VideoProcessor::new(&s, mode) {
+                    match VideoProcessor::new(&s, mode) {
                         Ok((processor, processed)) => {
                             set_local_stream.set(Some(processed));
                             Some(processor)
@@ -859,12 +886,18 @@ pub fn use_room_state() -> RoomState {
         let recording_stream_id_for_cleanup = recording_stream_id.clone();
         let webrtc_manager_for_ws = webrtc_manager.clone();
         let remote_control = remote_control.clone();
+        let whiteboard_repaint_at_for_ws = whiteboard_repaint_at.clone();
+        let whiteboard_repaint_timer_for_ws = whiteboard_repaint_timer.clone();
+        let whiteboard_max_rev_for_ws = whiteboard_max_rev.clone();
         move |_| {
             let analytics = analytics_for_ws.clone();
             let remote_control_for_effect = remote_control.clone();
             let local_recorder_for_cleanup = local_recorder_for_cleanup.clone();
             let pending_recorders_for_cleanup = pending_recorders_for_cleanup.clone();
             let recording_stream_id_for_cleanup = recording_stream_id_for_cleanup.clone();
+            let whiteboard_repaint_at = whiteboard_repaint_at_for_ws.clone();
+            let whiteboard_repaint_timer = whiteboard_repaint_timer_for_ws.clone();
+            let whiteboard_max_rev = whiteboard_max_rev_for_ws.clone();
             set_my_id.set(None);
             set_room_config.set(shared::RoomConfig::default());
 
@@ -938,6 +971,11 @@ pub fn use_room_state() -> RoomState {
                                 set_grid_layout_sig,
                                 set_whiteboard_history,
                                 set_last_draw_action,
+                                set_whiteboard_reset,
+                                set_whiteboard_append,
+                                whiteboard_repaint_at: whiteboard_repaint_at.clone(),
+                                whiteboard_repaint_timer: whiteboard_repaint_timer.clone(),
+                                whiteboard_max_rev: whiteboard_max_rev.clone(),
                                 set_shared_video_url,
                                 last_ping_time,
                                 set_rtt,
@@ -1664,12 +1702,9 @@ pub fn use_room_state() -> RoomState {
                 // `onstop` callbacks have had ample time to fire (the user
                 // had to click stop, wait, then click start again).
                 pending_recorders.borrow_mut().clear();
-                match crate::media_recorder::LocalRecorder::new(
-                    stream.clone(),
-                    Callback::new(move |msg: String| {
-                        add_toast(format!("Recording error: {}", msg), ToastType::Error);
-                    }),
-                ) {
+                match LocalRecorder::new(stream.clone(), move |msg: String| {
+                    add_toast(format!("Recording error: {}", msg), ToastType::Error);
+                }) {
                     Ok(r) => {
                         *local_recorder.borrow_mut() = Some(r);
                         *recording_stream_id.borrow_mut() = Some(stream.id());
@@ -1748,12 +1783,9 @@ pub fn use_room_state() -> RoomState {
                 // lose the recorded data. Stale recorders are cleaned up
                 // the next time the user manually starts a new recording
                 // (in toggle_local_recording) after an interactive delay.
-                match crate::media_recorder::LocalRecorder::new(
-                    stream.clone(),
-                    Callback::new(move |msg: String| {
-                        add_toast(format!("Recording error: {}", msg), ToastType::Error);
-                    }),
-                ) {
+                match LocalRecorder::new(stream.clone(), move |msg: String| {
+                    add_toast(format!("Recording error: {}", msg), ToastType::Error);
+                }) {
                     Ok(r) => {
                         *local_recorder.borrow_mut() = Some(r);
                         *recording_stream_id.borrow_mut() = Some(stream.id());
@@ -2046,6 +2078,8 @@ pub fn use_room_state() -> RoomState {
         show_whiteboard,
         show_etherpad,
         whiteboard_history,
+        whiteboard_reset,
+        whiteboard_append,
         my_id,
         typing_users,
         is_host,

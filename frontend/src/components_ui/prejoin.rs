@@ -1,7 +1,7 @@
-use crate::media::{
+use crate::state::JoinOptions;
+use browser_media::{
     AudioMonitor, DeviceInfo, get_audio_input_devices, get_user_media, get_video_input_devices,
 };
-use crate::state::JoinOptions;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -271,6 +271,7 @@ pub fn PrejoinScreen(
                         type="text"
                         id="display-name"
                         class="styled-input"
+                        maxlength="64"
                         on:input=move |ev| set_display_name.set(event_target_value(&ev))
                         prop:value=move || display_name.get()
                         placeholder="Enter your name"

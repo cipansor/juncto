@@ -82,6 +82,8 @@ backend implementation · **out of scope** — deliberately not implemented.
 | E2EE | indicator-only | Per-participant and per-room toggles plus a key-exchange message exist; **no actual encryption is performed**. Treat the indicator as a status display, not a security guarantee. |
 | Authentication | partial | The login dialog talks to a **mock** credential check (`MOCK_AUTH_USER` / `MOCK_AUTH_PASS`, default `admin` / `admin123`). Replace before gating anything on it. |
 | Visitor mode | complete | Read-only participation |
+| Room reset | complete | `POST /api/rooms` requires the `ROOM_ADMIN_TOKEN` bearer token; disabled while unset |
+| Bounded room state | complete | Chat history, whiteboard strokes and polls are capped; WebSocket messages are size-limited |
 
 > **Do not rely on E2EE or the authentication dialog for confidentiality.** Both are
 > wired through the UI and the protocol but stop short of a real cryptographic or identity

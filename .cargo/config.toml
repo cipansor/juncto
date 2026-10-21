@@ -1,0 +1,4 @@
+# Tests that target wasm need a browser to run in. The host-target test run is
+# unaffected because the runner only applies to wasm32.
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"

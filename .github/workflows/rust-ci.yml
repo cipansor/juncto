@@ -22,16 +22,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
     - name: Setup Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       with:
         targets: wasm32-unknown-unknown
         components: rustfmt, clippy
 
     - name: Cache Cargo
-      uses: actions/cache@v6
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: |
           ~/.cargo/registry
@@ -48,7 +48,7 @@ jobs:
       run: cargo clippy --workspace -- -D warnings
 
     - name: Lint WASM target with Clippy
-      run: cargo clippy -p frontend --target wasm32-unknown-unknown -- -D warnings
+      run: cargo clippy -p frontend -p browser-media --target wasm32-unknown-unknown -- -D warnings
 
     - name: Run Unit Tests
       run: cargo test --workspace
@@ -58,22 +58,70 @@ jobs:
         cargo install cargo-audit --locked
         cargo audit
 
+  browser-tests:
+    name: Browser Tests (wasm)
+    runs-on: ubuntu-latest
+    needs: checks
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      with:
+        targets: wasm32-unknown-unknown
+
+    - name: Cache Cargo
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Install wasm-bindgen-cli
+      run: |
+        if ! command -v wasm-bindgen-test-runner &> /dev/null; then
+            # Must match the wasm-bindgen version in Cargo.lock
+            cargo install -f wasm-bindgen-cli --version 0.2.128 --locked
+        fi
+
+    - name: Install matching chromedriver
+      run: |
+        # Chrome is preinstalled on ubuntu-latest; fetch the chromedriver build
+        # that matches it so the driver and browser versions agree.
+        CHROME_VERSION=$(google-chrome --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
+        echo "Chrome version: $CHROME_VERSION"
+        curl -sSL -o chromedriver.zip \
+          "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip"
+        python3 -c "import zipfile; zipfile.ZipFile('chromedriver.zip').extractall('.')"
+        sudo install -m 0755 chromedriver-linux64/chromedriver /usr/local/bin/chromedriver
+        chromedriver --version
+
+    - name: Run Browser Tests
+      run: cargo test -p browser-media --target wasm32-unknown-unknown --test browser
+      env:
+        WASM_BINDGEN_TEST_TIMEOUT: "120"
+
   e2e:
     name: Build and Run E2E Tests
     runs-on: ubuntu-latest
     needs: checks
     steps:
     - name: Checkout
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
     - name: Setup Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       with:
         targets: wasm32-unknown-unknown
         components: rustfmt, clippy
 
     - name: Cache Cargo
-      uses: actions/cache@v6
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: |
           ~/.cargo/registry
@@ -94,7 +142,7 @@ jobs:
       run: ./build.sh
 
     - name: Setup Node.js
-      uses: actions/setup-node@v7
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
       with:
         node-version: '20'
 
