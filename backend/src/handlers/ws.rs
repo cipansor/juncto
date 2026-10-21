@@ -16,15 +16,110 @@ use axum::{
     response::IntoResponse,
 };
 use futures::{sink::SinkExt, stream::StreamExt};
-use shared::{ClientMessage, Participant, RoomConfig, ServerMessage};
+use shared::{BreakoutRoom, ClientMessage, Participant, Poll, RoomConfig, ServerMessage};
 use std::sync::Arc;
 use tracing;
+
+/// Upper bound on a single inbound WebSocket message. axum already defaults to
+/// 64 MiB, but that is far larger than any legitimate client message and lets a
+/// single frame carry a multi-megabyte payload, so we set an explicit, tighter
+/// limit.
+const MAX_WS_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
+/// Authoritative snapshots used to recover a socket that fell behind the
+/// broadcast channel.
+///
+/// `RecvError::Lagged` means an unknown set of broadcasts was dropped. The
+/// incremental messages cannot repair that (a missed `Draw` or `PollRemoved`
+/// carries no way to reconstruct what was lost), so instead of continuing from
+/// a corrupt view we re-send the retained state. The whiteboard additionally
+/// uses per-stroke revisions to dedupe the replayed tail; the other snapshots
+/// replace client state wholesale (or merge by id), so re-sending them is safe.
+///
+/// The participant list and chat history are scoped to `room_id`, matching what
+/// the socket would have seen: main-room chat is retained, breakout-room chat
+/// is not. Polls and the whiteboard are room-wide. Snapshots are sent even when
+/// empty so state the client holds but the server no longer retains (an evicted
+/// poll, a stroke cleared by a room reset, a video that stopped) is cleared
+/// rather than left stale; the client merges chat by content so replaying the
+/// retained tail cannot duplicate a message.
+fn lag_resync_messages(state: &Arc<AppState>, room_id: Option<String>) -> Vec<ServerMessage> {
+    let mut msgs = Vec::new();
+
+    let participants: Vec<Participant> = {
+        let all = state.participants.lock().unwrap();
+        let locs = state.participant_locations.lock().unwrap();
+        all.values()
+            .filter(|p| locs.get(&p.id).cloned().flatten() == room_id)
+            .cloned()
+            .collect()
+    };
+    msgs.push(ServerMessage::ParticipantList(participants));
+
+    if room_id.is_none() {
+        // Sent even when empty: the snapshot is authoritative for retained
+        // main-room public chat, so an empty one must clear public messages a
+        // client still holds from a previous room (e.g. after a reset). The
+        // client preserves its own private messages, which the server never
+        // retains and therefore never includes here.
+        let history = state.chat_history.lock().unwrap().clone();
+        msgs.push(ServerMessage::ChatHistory(history));
+    }
+
+    // The client derives host status, lock state and moderation controls from
+    // the room config, so a dropped `RoomUpdated` (e.g. a host transfer) must be
+    // repaired too — none of the other snapshots carry it.
+    msgs.push(ServerMessage::RoomUpdated(
+        state.room_config.lock().unwrap().clone(),
+    ));
+
+    let polls: Vec<Poll> = state.polls.lock().unwrap().values().cloned().collect();
+    msgs.push(ServerMessage::PollsList(polls));
+
+    let rooms: Vec<BreakoutRoom> = state
+        .breakout_rooms
+        .lock()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect();
+    msgs.push(ServerMessage::BreakoutRoomsList(rooms));
+
+    let whiteboard = state.whiteboard.lock().unwrap().clone();
+    msgs.push(ServerMessage::WhiteboardHistory(whiteboard));
+
+    match state.shared_video_url.lock().unwrap().clone() {
+        Some(url) => msgs.push(ServerMessage::VideoShared(url)),
+        None => msgs.push(ServerMessage::VideoStopped),
+    }
+
+    msgs
+}
+
+/// Whether a chat message should still be delivered to a socket. Public
+/// main-room messages are the only ones retained server-side; a room reset
+/// clears that history, so a stale pre-reset `Chat` still queued in a socket's
+/// broadcast buffer must be dropped rather than replayed after the resync
+/// `ChatHistory` already cleared it. Breakout-room and private messages are not
+/// retained and are always deliverable.
+fn chat_is_deliverable(state: &Arc<AppState>, message: &shared::ChatMessage) -> bool {
+    if message.recipient_id.is_some() || message.room_id.is_some() {
+        return true;
+    }
+    state
+        .chat_history
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|m| m.id == message.id)
+}
 
 pub async fn chat_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
+        .on_upgrade(|socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
@@ -273,6 +368,28 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             room_config_mutex.lock().unwrap().host_id == Some(uid.clone())
                                         };
                                         if is_host {
+                                            // Colours are written straight into CSS custom
+                                            // properties on every participant's client and the
+                                            // logo into an <img src>, so validate both before
+                                            // accepting them: only hex colours and https URLs.
+                                            if let Some(ref color) = branding.primary_color
+                                                && !shared::is_valid_css_hex_color(color)
+                                            {
+                                                let _ = internal_tx.send(ServerMessage::Error("Invalid primary color: expected a hex value like #RRGGBB".to_string())).await;
+                                                continue;
+                                            }
+                                            if let Some(ref color) = branding.background_color
+                                                && !shared::is_valid_css_hex_color(color)
+                                            {
+                                                let _ = internal_tx.send(ServerMessage::Error("Invalid background color: expected a hex value like #RRGGBB".to_string())).await;
+                                                continue;
+                                            }
+                                            if let Some(ref logo) = branding.logo_url
+                                                && !shared::is_valid_logo_url(logo)
+                                            {
+                                                let _ = internal_tx.send(ServerMessage::Error("Invalid logo URL: must start with https://".to_string())).await;
+                                                continue;
+                                            }
                                             let new_config = {
                                                 let mut config = room_config_mutex.lock().unwrap();
                                                 config.branding = branding;
@@ -735,6 +852,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                 ClientMessage::Join { name, is_visitor, avatar_url, password } => {
                                     if my_id.is_some() || knocking_id.is_some() { continue; } // Already joined or knocking
 
+                                    // Cap the display name so a client cannot bloat
+                                    // every participant's roster with an unbounded string.
+                                    if name.chars().count() > shared::MAX_PARTICIPANT_NAME_LEN {
+                                        let _ = internal_tx.send(ServerMessage::Error("Name too long".to_string())).await;
+                                        continue;
+                                    }
+
                                     // Sanitize avatar URL on join: since `avatar_url` is an
                                     // optional cosmetic field, an invalid value should not
                                     // prevent the user from joining the room. Drop the URL
@@ -940,6 +1064,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     let my_id_clone = id.clone();
                                     let room_config_for_task = room_config_mutex.clone();
                                     let locations_clone = participant_locations_mutex.clone();
+                                    let state_for_task = state.clone();
 
                                     broadcast_task = Some(tokio::spawn(async move {
                                         loop {
@@ -957,7 +1082,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                             } else if let Some(target) = &message.recipient_id {
                                                                 *target == my_id_clone || message.user_id == my_id_clone // Must echo private message back to self
                                                             } else {
-                                                                true
+                                                                // Drop a retained-but-cleared public
+                                                                // message replayed from the buffer.
+                                                                chat_is_deliverable(&state_for_task, message)
                                                             }
                                                         },
                                                         ServerMessage::PeerTyping { room_id, .. } => {
@@ -1123,7 +1250,36 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                     if should_send
                                                         && forward_tx.send(msg).await.is_err() { break; }
                                                 },
-                                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                                    // We missed an unknown set of broadcasts. The
+                                                    // incremental messages cannot repair that
+                                                    // (a missed `Draw`/`PollRemoved` carries no
+                                                    // way to reconstruct it), so re-send the
+                                                    // retained state for this socket's room and
+                                                    // let the client replace its view. A room
+                                                    // reset now broadcasts matching clear events,
+                                                    // so a stale pre-reset event still queued in
+                                                    // the buffer cannot resurrect cleared state.
+                                                    // This cannot loop unboundedly: sending awaits
+                                                    // `forward_tx`, so a socket that is not
+                                                    // draining blocks here instead of hitting
+                                                    // `Lagged` again.
+                                                    let my_room = {
+                                                        let locs = locations_clone.lock().unwrap();
+                                                        locs.get(&my_id_clone).cloned().flatten()
+                                                    };
+                                                    let msgs = lag_resync_messages(&state_for_task, my_room);
+                                                    let mut send_failed = false;
+                                                    for msg in msgs {
+                                                        if forward_tx.send(msg).await.is_err() {
+                                                            send_failed = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                    if send_failed {
+                                                        break;
+                                                    }
+                                                }
                                                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                             }
                                         }
@@ -1277,7 +1433,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             continue;
                                         }
                                         match polls::create_poll(uid, poll, &state) {
-                                            Ok(msg) => { let _ = tx.send(msg); },
+                                            Ok(outcome) => {
+                                                // Tell clients about evicted polls before the
+                                                // new one so their list stays consistent.
+                                                if !outcome.removed.is_empty() {
+                                                    let _ = tx.send(ServerMessage::PollRemoved(outcome.removed));
+                                                }
+                                                let _ = tx.send(outcome.message);
+                                            },
                                             Err(e) => { let _ = internal_tx.send(ServerMessage::Error(e)).await; }
                                         }
                                     }
@@ -1314,8 +1477,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             let _ = internal_tx.send(ServerMessage::Error("Visitors cannot draw on the whiteboard".to_string())).await;
                                             continue;
                                         }
-                                        let msg = whiteboard::process_draw_action(uid, action, &state);
-                                        let _ = tx.send(msg);
+                                        // Mutation + broadcast happen atomically
+                                        // under the whiteboard lock (see
+                                        // `apply_draw`), so concurrent drawers
+                                        // cannot reach clients out of order.
+                                        whiteboard::apply_draw(uid, action, &state);
                                     }
                                 },
                                 ClientMessage::Reaction(emoji) => {
@@ -1335,6 +1501,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                 },
                                 ClientMessage::UpdateProfile(new_name) => {
                                     if let Some(uid) = &my_id {
+                                        // Same cap as `Join`: reject over-long renames
+                                        // rather than storing/broadcasting them.
+                                        if new_name.chars().count() > shared::MAX_PARTICIPANT_NAME_LEN {
+                                            let _ = internal_tx.send(ServerMessage::Error("Name too long".to_string())).await;
+                                            continue;
+                                        }
                                         let updated_participant = {
                                             let mut participants = participants_mutex.lock().unwrap();
                                             if let Some(p) = participants.get_mut(uid) {
@@ -1912,6 +2084,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                             let my_id_clone = id.clone();
                             let room_config_clone = room_config_mutex.clone();
                             let locations_clone = participant_locations_mutex.clone();
+                            let state_for_task = state.clone();
                             broadcast_task = Some(tokio::spawn(async move {
                                 loop {
                                     match rx.recv().await {
@@ -1928,7 +2101,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                     } else if let Some(target) = &message.recipient_id {
                                                         *target == my_id_clone || message.user_id == my_id_clone // Must echo private message back to self
                                                     } else {
-                                                        true
+                                                        // Drop a retained-but-cleared public
+                                                        // message replayed from the buffer.
+                                                        chat_is_deliverable(&state_for_task, message)
                                                     }
                                                 },
                                                 ServerMessage::PeerTyping { room_id, .. } => {
@@ -2080,7 +2255,30 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             if should_send
                                                 && forward_tx.send(msg).await.is_err() { break; }
                                         },
-                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                            // Missed an unknown set of broadcasts. Re-send the
+                                            // retained state for this socket's room so the
+                                            // client can replace its view; incremental
+                                            // messages cannot repair the gap. A room reset
+                                            // broadcasts matching clear events, so a stale
+                                            // pre-reset event still queued in the buffer
+                                            // cannot resurrect cleared state.
+                                            let my_room = {
+                                                let locs = locations_clone.lock().unwrap();
+                                                locs.get(&my_id_clone).cloned().flatten()
+                                            };
+                                            let msgs = lag_resync_messages(&state_for_task, my_room);
+                                            let mut send_failed = false;
+                                            for msg in msgs {
+                                                if forward_tx.send(msg).await.is_err() {
+                                                    send_failed = true;
+                                                    break;
+                                                }
+                                            }
+                                            if send_failed {
+                                                break;
+                                            }
+                                        }
                                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                     }
                                 }
@@ -2254,8 +2452,262 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 }
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    fn create_mock_state() -> Arc<AppState> {
+        let (tx, _) = tokio::sync::broadcast::channel(10);
+        Arc::new(AppState {
+            tx,
+            participants: Arc::new(Mutex::new(HashMap::new())),
+            knocking_participants: Arc::new(Mutex::new(HashMap::new())),
+            room_config: Arc::new(Mutex::new(RoomConfig::default())),
+            polls: Arc::new(Mutex::new(HashMap::new())),
+            whiteboard: Arc::new(Mutex::new(Vec::new())),
+            chat_history: Arc::new(Mutex::new(Vec::new())),
+            breakout_rooms: Arc::new(Mutex::new(HashMap::new())),
+            participant_locations: Arc::new(Mutex::new(HashMap::new())),
+            shared_video_url: Arc::new(Mutex::new(None)),
+            speaking_start_times: Arc::new(Mutex::new(HashMap::new())),
+            feedback: Arc::new(Mutex::new(Vec::new())),
+            remote_control_sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_remote_control_requests: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            unmute_permissions: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            camera_permissions: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            feedback_timestamps: Arc::new(Mutex::new(HashMap::new())),
+            poll_seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            whiteboard_rev: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            admin_token: None,
+        })
+    }
+
+    fn participant(id: &str) -> Participant {
+        Participant {
+            id: id.to_string(),
+            name: id.to_string(),
+            is_hand_raised: false,
+            is_sharing_screen: false,
+            is_muted: false,
+            is_camera_muted: false,
+            speaking_time: 0,
+            presence: shared::PresenceStatus::default(),
+            is_visitor: false,
+            e2ee_enabled: false,
+            hand_raised_at: None,
+            avatar_url: None,
+        }
+    }
+
     #[test]
     fn test_ws_handler() {
         let _ = true;
+    }
+
+    #[test]
+    fn lag_resync_always_restores_video_and_scopes_state_to_room() {
+        let state = create_mock_state();
+
+        // Two participants: one in the main room (None), one in breakout "b1".
+        state
+            .participants
+            .lock()
+            .unwrap()
+            .insert("main".into(), participant("main"));
+        state
+            .participants
+            .lock()
+            .unwrap()
+            .insert("break".into(), participant("break"));
+        state
+            .participant_locations
+            .lock()
+            .unwrap()
+            .insert("main".into(), None);
+        state
+            .participant_locations
+            .lock()
+            .unwrap()
+            .insert("break".into(), Some("b1".into()));
+
+        state.breakout_rooms.lock().unwrap().insert(
+            "b1".into(),
+            BreakoutRoom {
+                id: "b1".into(),
+                name: "Room 1".into(),
+            },
+        );
+
+        // A missed `VideoStopped` must be repaired even when nothing is shared,
+        // otherwise a stale video stays pinned on the client.
+        let msgs = lag_resync_messages(&state, None);
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::VideoStopped)),
+            "resync must always carry the current shared-video state"
+        );
+
+        // Participant list is scoped: main-room recovery sees only "main".
+        let list = msgs.iter().find_map(|m| match m {
+            ServerMessage::ParticipantList(list) => Some(list.clone()),
+            _ => None,
+        });
+        let ids: Vec<String> = list
+            .expect("participant list")
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ids, vec!["main".to_string()]);
+
+        // The breakout-room participant's recovery is scoped to their room.
+        let msgs_break = lag_resync_messages(&state, Some("b1".into()));
+        let list = msgs_break.iter().find_map(|m| match m {
+            ServerMessage::ParticipantList(list) => Some(list.clone()),
+            _ => None,
+        });
+        let ids: Vec<String> = list
+            .expect("participant list")
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ids, vec!["break".to_string()]);
+    }
+
+    #[test]
+    fn lag_resync_includes_chat_polls_whiteboard_and_rooms() {
+        let state = create_mock_state();
+
+        state
+            .chat_history
+            .lock()
+            .unwrap()
+            .push(shared::ChatMessage {
+                id: String::new(),
+                user_id: "u".into(),
+                content: "hi".into(),
+                recipient_id: None,
+                timestamp: 1,
+                attachment: None,
+                room_id: None,
+            });
+        state.polls.lock().unwrap().insert(
+            "p1".into(),
+            Poll {
+                id: "p1".into(),
+                question: "?".into(),
+                options: Vec::new(),
+                voters: std::collections::HashSet::new(),
+                is_closed: false,
+                created_seq: 1,
+            },
+        );
+        state.whiteboard.lock().unwrap().push(shared::DrawAction {
+            color: "#000".into(),
+            width: 1.0,
+            start_x: 0.0,
+            start_y: 0.0,
+            end_x: 1.0,
+            end_y: 1.0,
+            sender_id: "u".into(),
+            rev: 1,
+        });
+        state.breakout_rooms.lock().unwrap().insert(
+            "b1".into(),
+            BreakoutRoom {
+                id: "b1".into(),
+                name: "Room 1".into(),
+            },
+        );
+        *state.shared_video_url.lock().unwrap() = Some("https://v".into());
+
+        let msgs = lag_resync_messages(&state, None);
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::ChatHistory(h) if h.len() == 1))
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::PollsList(p) if p.len() == 1))
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::WhiteboardHistory(w) if w.len() == 1))
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::BreakoutRoomsList(r) if r.len() == 1))
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::VideoShared(u) if u == "https://v"))
+        );
+    }
+
+    #[test]
+    fn lag_resync_sends_empty_chat_history_to_clear_stale_public_chat() {
+        // After a room reset the server history is empty; the resync must still
+        // send a (empty) `ChatHistory` so the client drops public messages it
+        // still holds from the previous room.
+        let state = create_mock_state();
+        let msgs = lag_resync_messages(&state, None);
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::ChatHistory(h) if h.is_empty())),
+            "an empty room must still yield an empty ChatHistory snapshot"
+        );
+    }
+
+    #[test]
+    fn lag_resync_includes_room_config() {
+        // A dropped `RoomUpdated` (e.g. a host transfer) must be repaired, since
+        // no other snapshot carries the config the client derives host state from.
+        let state = create_mock_state();
+        let msgs = lag_resync_messages(&state, None);
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, ServerMessage::RoomUpdated(_))),
+            "resync must carry the current room config"
+        );
+    }
+
+    #[test]
+    fn public_chat_not_in_history_is_dropped() {
+        // A stale pre-reset public message still queued in the broadcast buffer
+        // must not be replayed after the resync cleared the history.
+        let state = create_mock_state();
+        let stale = shared::ChatMessage {
+            id: "old".into(),
+            user_id: "u".into(),
+            content: "from the previous room".into(),
+            recipient_id: None,
+            timestamp: 1,
+            attachment: None,
+            room_id: None,
+        };
+        assert!(!chat_is_deliverable(&state, &stale));
+
+        // Once a message is retained, it is deliverable again.
+        let retained = shared::ChatMessage {
+            id: "new".into(),
+            ..stale.clone()
+        };
+        state.chat_history.lock().unwrap().push(retained.clone());
+        assert!(chat_is_deliverable(&state, &retained));
+
+        // Private and breakout messages are never retained; always deliverable.
+        assert!(chat_is_deliverable(
+            &state,
+            &shared::ChatMessage {
+                recipient_id: Some("peer".into()),
+                ..stale.clone()
+            }
+        ));
+        assert!(chat_is_deliverable(
+            &state,
+            &shared::ChatMessage {
+                room_id: Some("breakout".into()),
+                ..stale.clone()
+            }
+        ));
     }
 }

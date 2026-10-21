@@ -1,6 +1,6 @@
 use crate::components_ui::toast::{ToastType, use_toast};
 use crate::i18n::t;
-use crate::media::{enumerate_devices, get_user_media};
+use browser_media::{enumerate_devices, get_user_media};
 use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
@@ -282,6 +282,7 @@ pub fn SettingsDialog(
                                 <input
                                     type="text"
                                     id="settings-display-name"
+                                    maxlength="64"
                                     prop:value=move || display_name.get()
                                     on:input=move |ev| set_display_name.set(event_target_value(&ev))
                                     style="width: 100%;"
@@ -560,6 +561,7 @@ pub fn SettingsDialog(
                                 <input
                                     type="text"
                                     id="branding-logo-url"
+                                    maxlength="2048"
                                     prop:value=logo_url
                                     on:input=move |ev| set_logo_url.set(event_target_value(&ev))
                                     style="width: 100%;"

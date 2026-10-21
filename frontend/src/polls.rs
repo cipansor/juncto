@@ -41,6 +41,7 @@ pub fn PollsDialog(
                 ],
                 voters: std::collections::HashSet::new(),
                 is_closed: false,
+                created_seq: 0,
             };
             on_create_poll.run(poll);
             // Reset and switch to active
@@ -302,6 +303,7 @@ mod tests {
             options: vec![],
             voters: HashSet::new(),
             is_closed: false,
+            created_seq: 0,
         };
         let p2 = Poll {
             id: "2".to_string(),
@@ -309,6 +311,7 @@ mod tests {
             options: vec![],
             voters: HashSet::new(),
             is_closed: true,
+            created_seq: 0,
         };
 
         let polls = [p1.clone(), p2.clone()];

@@ -2,6 +2,7 @@ use super::*;
 #[test]
 fn test_chat_message_serialization() {
     let msg = ChatMessage {
+        id: String::new(),
         user_id: "user1".to_string(),
         content: "Hello Rust".to_string(),
         recipient_id: None,
@@ -23,6 +24,7 @@ fn test_chat_message_with_attachment_serialization() {
         content_base64: "SGVsbG8gV29ybGQ=".to_string(),
     };
     let msg = ChatMessage {
+        id: String::new(),
         user_id: "user1".to_string(),
         content: "Here is a file".to_string(),
         recipient_id: None,
@@ -138,6 +140,7 @@ fn test_poll_serialization() {
         ],
         voters: std::collections::HashSet::new(),
         is_closed: false,
+        created_seq: 0,
     };
     let msg = ClientMessage::CreatePoll(poll.clone());
     let json = serde_json::to_string(&msg).unwrap();
@@ -390,9 +393,105 @@ fn test_draw_serialization() {
         end_y: 40.0,
         width: 2.0,
         sender_id: "user1".to_string(),
+        rev: 0,
     };
     let msg = ClientMessage::Draw(draw.clone());
     let json = serde_json::to_string(&msg).unwrap();
     let deserialized: ClientMessage = serde_json::from_str(&json).unwrap();
     assert_eq!(msg, deserialized);
+}
+
+#[test]
+fn test_whiteboard_evicted_serialization() {
+    let msg = ServerMessage::WhiteboardEvicted { count: 3 };
+    let json = serde_json::to_string(&msg).unwrap();
+    let deserialized: ServerMessage = serde_json::from_str(&json).unwrap();
+    assert_eq!(msg, deserialized);
+}
+
+#[test]
+fn test_is_valid_css_hex_color_accepts_hex_literals() {
+    for valid in ["#fff", "#FFF", "#ffffff", "#0a1B2c", "#11223344"] {
+        assert!(is_valid_css_hex_color(valid), "{valid} should be valid");
+    }
+}
+
+#[test]
+fn test_is_valid_css_hex_color_rejects_non_hex() {
+    for invalid in [
+        "",
+        "fff",
+        "#",
+        "#12",
+        "#12345",
+        "#gggggg",
+        "red",
+        "var(--x)",
+        "url(https://evil.example/x)",
+        "#fff; background: url(https://evil.example/x)",
+        "#fff\r\nX: y",
+    ] {
+        assert!(
+            !is_valid_css_hex_color(invalid),
+            "{invalid} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn test_is_valid_logo_url() {
+    assert!(is_valid_logo_url("https://example.com/logo.png"));
+    assert!(!is_valid_logo_url("http://example.com/logo.png"));
+    assert!(!is_valid_logo_url("javascript:alert(1)"));
+    assert!(!is_valid_logo_url("data:image/svg+xml,<svg/>"));
+    assert!(!is_valid_logo_url("/relative/logo.png"));
+    assert!(!is_valid_logo_url(""));
+    let too_long = format!("https://example.com/{}", "a".repeat(2100));
+    assert!(!is_valid_logo_url(&too_long));
+}
+
+#[test]
+fn test_is_same_chat_uses_id_when_present() {
+    let a = ChatMessage {
+        id: "m1".into(),
+        user_id: "u".into(),
+        content: "hi".into(),
+        recipient_id: None,
+        timestamp: 5,
+        attachment: None,
+        room_id: None,
+    };
+    // Same id, different body: still the same message (id wins).
+    let mut b = a.clone();
+    b.content = "changed".into();
+    assert!(is_same_chat(&a, &b));
+
+    // Different ids: distinct, even with identical fields.
+    let mut c = a.clone();
+    c.id = "m2".into();
+    assert!(!is_same_chat(&a, &c));
+}
+
+#[test]
+fn test_is_same_chat_distinguishes_attachment_only_messages() {
+    // Two file-only messages with empty content, same sender and millisecond:
+    // they differ only by attachment, so they must not be collapsed.
+    let a = ChatMessage {
+        id: String::new(),
+        user_id: "u".into(),
+        content: String::new(),
+        recipient_id: None,
+        timestamp: 7,
+        attachment: Some(FileAttachment {
+            filename: "a.txt".into(),
+            mime_type: "text/plain".into(),
+            size: 1,
+            content_base64: "YQ==".into(),
+        }),
+        room_id: None,
+    };
+    let mut b = a.clone();
+    b.attachment.as_mut().unwrap().filename = "b.txt".into();
+    assert!(!is_same_chat(&a, &b));
+    assert!(is_same_chat(&a, &a.clone()));
 }
