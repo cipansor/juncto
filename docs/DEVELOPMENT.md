@@ -59,9 +59,9 @@ cd tests/e2e && npx playwright test
 
 ### Unit tests
 
-`cargo test --workspace` currently runs **102 tests** across the three crates: 29 in
-`shared`, 49 in `frontend` and 24 in `backend`. Tests live beside the code they exercise
-in a `#[cfg(test)] mod tests` block. Pure logic (message formatting, timers, ordering,
+`cargo test --workspace` currently runs **130 tests** across the three crates: 30 in
+`shared`, 49 in `frontend` (3 ignored) and 51 in `backend`. Tests live beside the code they
+exercise in a `#[cfg(test)] mod tests` block. Pure logic (message formatting, timers, ordering,
 permission decisions) is the sweet spot for unit tests; anything that needs a DOM or a
 socket belongs in the Playwright suite instead.
 

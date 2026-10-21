@@ -156,7 +156,7 @@ Run everything from the repository root:
 ```sh
 cargo fmt --all -- --check                    # formatting
 cargo clippy --workspace -- -D warnings       # lints, warnings are errors
-cargo test --workspace                        # 102 unit tests
+cargo test --workspace                        # 130 unit tests
 cd tests/e2e && npx playwright test           # end-to-end parity + visual suite
 ```
 
@@ -201,6 +201,7 @@ in `backend/src/main.rs` and rebuild if you need a different port.
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `ROOM_ADMIN_TOKEN` | _(unset)_ | Bearer token required by `POST /api/rooms`. The endpoint is disabled while unset, so an anonymous client cannot reset the room. |
 | `MOCK_AUTH_USER` | `admin` | Username accepted by the demo authentication dialog |
 | `MOCK_AUTH_PASS` | `admin123` | Password accepted by the demo authentication dialog |
 
@@ -212,6 +213,12 @@ correctly no matter which directory you launch it from.
 Room-level protection is available today: room lock with an optional password, a lobby
 that requires host approval before anyone enters, visitor mode, and an E2EE status
 indicator with per-participant key-exchange signalling.
+
+The room-reset endpoint (`POST /api/rooms`) mutates the single global room and clears all
+live state, so it requires a bearer token set via `ROOM_ADMIN_TOKEN`; while that variable
+is unset the endpoint is disabled. Chat history, whiteboard strokes and polls are capped
+and inbound WebSocket messages are size-limited, so a single client cannot grow server
+memory without bound.
 
 For reporting vulnerabilities, see [SECURITY.md](./SECURITY.md).
 

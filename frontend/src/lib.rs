@@ -8,8 +8,6 @@ mod dropbox;
 mod face_landmarks;
 mod giphy;
 mod i18n;
-mod media;
-mod media_recorder;
 mod pages;
 mod participants;
 mod polls;

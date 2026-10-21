@@ -129,10 +129,24 @@ pub struct DrawAction {
     pub width: f64,
     #[serde(default)] // For backward compatibility if needed, though we are migrating fresh
     pub sender_id: String,
+    /// Monotonic revision assigned by the server in whiteboard order. A client
+    /// ignores any stroke whose `rev` is not greater than the newest it already
+    /// holds, so strokes replayed after a resync snapshot (see the lag path in
+    /// the broadcast task) are not duplicated. Client-sent draws leave this at
+    /// 0; the server overwrites it.
+    #[serde(default)]
+    pub rev: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatMessage {
+    /// Server-assigned unique identifier. Deduplication (a `Chat` replayed from
+    /// the broadcast buffer after a `ChatHistory` resync) keys off this rather
+    /// than `(user_id, timestamp, content)`, which collides for two identical
+    /// messages sent in the same millisecond or for file-only messages with
+    /// empty content. Empty for messages from older servers.
+    #[serde(default)]
+    pub id: String,
     pub user_id: String,
     pub content: String,
     pub recipient_id: Option<String>,
@@ -141,6 +155,23 @@ pub struct ChatMessage {
     pub attachment: Option<FileAttachment>,
     #[serde(default)]
     pub room_id: Option<String>,
+}
+
+/// Whether two messages are the same logical message, for de-duplicating a
+/// `Chat` replayed from the broadcast buffer against a `ChatHistory` snapshot.
+/// Uses the server-assigned `id` when both carry one; falls back to the full
+/// field tuple for legacy messages so two distinct same-millisecond messages,
+/// or file-only messages with empty content, are not collapsed into one.
+pub fn is_same_chat(a: &ChatMessage, b: &ChatMessage) -> bool {
+    if !a.id.is_empty() && !b.id.is_empty() {
+        return a.id == b.id;
+    }
+    a.user_id == b.user_id
+        && a.timestamp == b.timestamp
+        && a.content == b.content
+        && a.recipient_id == b.recipient_id
+        && a.room_id == b.room_id
+        && a.attachment == b.attachment
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, Eq, Hash)]
@@ -201,6 +232,11 @@ pub struct Poll {
     pub voters: HashSet<String>,
     #[serde(default)]
     pub is_closed: bool,
+    /// Monotonic creation sequence used to evict the oldest poll
+    /// deterministically once `MAX_POLLS` is reached. Assigned by the server;
+    /// `HashMap` iteration order does not track insertion age.
+    #[serde(default)]
+    pub created_seq: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -402,7 +438,19 @@ pub enum ServerMessage {
     PollCreated(Poll),
     PollUpdated(Poll),
     PollsList(Vec<Poll>),
+    /// Poll IDs evicted from server state to stay under the retention cap.
+    /// Connected clients must drop them so their poll list stays in sync.
+    PollRemoved(Vec<String>),
     Draw(DrawAction),
+    /// Number of oldest strokes the server dropped from its retained history
+    /// to stay under `MAX_WHITEBOARD_STROKES`. Clients trim the same count from
+    /// the front of their history and repaint at a bounded cadence, instead of
+    /// receiving (and repainting) the full history on every draw past the cap.
+    WhiteboardEvicted {
+        count: u32,
+    },
+    /// Full authoritative snapshot of the retained strokes. Sent on join
+    /// rather than on every eviction, so steady-state drawing stays incremental.
     WhiteboardHistory(Vec<DrawAction>),
     ChatHistory(Vec<ChatMessage>),
     Welcome {
@@ -554,6 +602,50 @@ pub fn is_giphy_cdn_url(url: &str) -> bool {
     } else {
         url.starts_with("https://i.giphy.com/")
     }
+}
+
+/// Maximum length (in Unicode scalar values) accepted for a participant
+/// display name. Enforced by the backend on `Join` and `UpdateProfile`, and
+/// mirrored by the client so users get immediate feedback.
+pub const MAX_PARTICIPANT_NAME_LEN: usize = 64;
+
+/// Maximum number of chat messages retained. Enforced by the server on the
+/// authoritative history and mirrored by the client so a long-lived browser
+/// tab cannot accumulate more messages than the server would replay.
+pub const MAX_CHAT_HISTORY: usize = 500;
+
+/// Maximum number of whiteboard strokes retained. Enforced by the server on
+/// the authoritative history and mirrored by the client so a long-lived
+/// browser tab cannot accumulate more strokes than the server would replay.
+pub const MAX_WHITEBOARD_STROKES: usize = 10_000;
+
+/// Maximum number of polls retained. Enforced by the server on the
+/// authoritative map and mirrored by the client so a long-lived browser tab
+/// cannot accumulate more polls than the server holds.
+pub const MAX_POLLS: usize = 200;
+
+/// Returns `true` if `value` is a CSS colour literal that is safe to assign to
+/// a CSS custom property: `#rgb`, `#rrggbb` or `#rrggbbaa` hex.
+///
+/// Branding colours arrive from a client and are written straight into
+/// `--primary-color` / `--background-color`, so anything that is not a plain
+/// hex literal (a `url(...)`, a `;`-separated declaration, `var(...)`, …) must
+/// be rejected rather than forwarded to every participant's stylesheet.
+pub fn is_valid_css_hex_color(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix('#') else {
+        return false;
+    };
+    matches!(hex.len(), 3 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Returns `true` if `url` is an acceptable branding logo URL: an absolute
+/// `https://` URL of at most 2048 characters.
+///
+/// Mirrors the avatar-URL rules so a host cannot make other participants'
+/// browsers issue `http://` (mixed-content / tracking) or other-scheme
+/// requests through `SetBranding`.
+pub fn is_valid_logo_url(url: &str) -> bool {
+    url.starts_with("https://") && url.len() <= 2048
 }
 
 #[cfg(test)]
