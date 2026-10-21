@@ -5,30 +5,53 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{BlobEvent, MediaRecorder, MediaRecorderOptions, MediaStream};
 
-/// Container/codec combinations to try, most preferred first. The first one
-/// the browser reports as supported wins, so recording still works on engines
-/// that lack VP9 or Opus.
-pub(crate) const CANDIDATE_MIME_TYPES: &[&str] = &[
+/// Video container/codec combinations to try, most preferred first. The first
+/// one the browser reports as supported wins, so recording still works on
+/// engines that lack VP9 or Opus.
+const VIDEO_MIME_TYPES: &[&str] = &[
     "video/webm;codecs=vp9,opus",
     "video/webm;codecs=vp8,opus",
     "video/webm",
-    "audio/webm",
 ];
+
+/// Audio-only container/codec combinations to try, most preferred first.
+const AUDIO_MIME_TYPES: &[&str] = &["audio/webm;codecs=opus", "audio/webm"];
 
 /// Filename stem used when the caller does not supply one.
 pub const DEFAULT_FILENAME_PREFIX: &str = "recording";
 
-/// Returns the first candidate mime type accepted by `supported`.
+/// Returns the first candidate mime type for `has_video` accepted by `supported`.
 ///
-/// Split out from [`pick_mime_type`] so the selection order can be tested
-/// without a browser.
-pub(crate) fn pick_mime_type_with(supported: impl Fn(&str) -> bool) -> Option<&'static str> {
-    CANDIDATE_MIME_TYPES.iter().copied().find(|t| supported(t))
+/// `MediaRecorder.isTypeSupported` answers for a mime type in isolation, not for
+/// a particular stream: a browser can report a video type as supported and then
+/// refuse it for an audio-only stream. So the candidate list is selected from
+/// the stream's own track composition instead of always preferring video, which
+/// would leave an otherwise usable `audio/webm` unused.
+///
+/// Split out from the call site so the selection order can be tested without a
+/// browser.
+pub(crate) fn pick_mime_type_with(
+    supported: impl Fn(&str) -> bool,
+    has_video: bool,
+) -> Option<&'static str> {
+    let candidates = if has_video {
+        VIDEO_MIME_TYPES
+    } else {
+        AUDIO_MIME_TYPES
+    };
+    candidates.iter().copied().find(|t| supported(t))
 }
 
-/// Returns the most preferred mime type the current browser supports.
-fn pick_mime_type() -> Option<&'static str> {
-    pick_mime_type_with(MediaRecorder::is_type_supported)
+/// File extension implied by a mime type, e.g. `audio/webm;codecs=opus` -> `webm`.
+fn extension_for(mime_type: &str) -> &str {
+    mime_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .split('/')
+        .nth(1)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("webm")
 }
 
 /// Records a [`MediaStream`] and, on stop, downloads the result as a file.
@@ -49,16 +72,35 @@ impl LocalRecorder {
     /// Starts recording `stream`, calling `on_error` with a message if the
     /// browser reports a recording error.
     ///
-    /// The downloaded file is named `recording-<timestamp>.webm`; change the
-    /// stem with [`LocalRecorder::set_filename_prefix`].
+    /// The mime type is chosen from the stream's own tracks, so an audio-only
+    /// stream records as `audio/webm` rather than being handed a video codec it
+    /// cannot use. The downloaded file is named
+    /// `recording-<timestamp>.<ext>`, where `<ext>` follows the format the
+    /// browser actually produced; change the stem with
+    /// [`LocalRecorder::set_filename_prefix`].
     pub fn new(stream: MediaStream, on_error: impl Fn(String) + 'static) -> Result<Self, JsValue> {
+        // The stream's own tracks decide which candidates make sense: preferring
+        // a video type for a microphone-only stream makes the browser reject the
+        // configuration even when it supports `audio/webm`.
+        let has_video = stream.get_video_tracks().length() > 0;
+        let requested_mime = pick_mime_type_with(MediaRecorder::is_type_supported, has_video);
+
         let options = MediaRecorderOptions::new();
-        if let Some(mime_type) = pick_mime_type() {
+        if let Some(mime_type) = requested_mime {
             options.set_mime_type(mime_type);
         }
 
         let recorder =
             MediaRecorder::new_with_media_stream_and_media_recorder_options(&stream, &options)?;
+
+        // The browser may ignore the request and pick its own default, so read
+        // the effective type back. The container and the label on the finished
+        // blob have to agree, otherwise MIME-sensitive players misclassify it.
+        let mime_type = match recorder.mime_type() {
+            t if t.is_empty() => requested_mime.unwrap_or("video/webm").to_string(),
+            t => t,
+        };
+        let extension = extension_for(&mime_type).to_string();
 
         let chunks: Rc<RefCell<Vec<web_sys::Blob>>> = Rc::new(RefCell::new(Vec::new()));
         let filename_prefix = Rc::new(RefCell::new(DEFAULT_FILENAME_PREFIX.to_string()));
@@ -74,6 +116,8 @@ impl LocalRecorder {
 
         let chunks_clone_2 = chunks.clone();
         let filename_prefix_clone = filename_prefix.clone();
+        let mime_type_clone = mime_type.clone();
+        let extension_clone = extension.clone();
         let on_stop = Closure::wrap(Box::new(move || {
             let blob_parts = js_sys::Array::new();
             for blob in chunks_clone_2.borrow().iter() {
@@ -81,7 +125,7 @@ impl LocalRecorder {
             }
 
             let property_bag = web_sys::BlobPropertyBag::new();
-            property_bag.set_type("video/webm");
+            property_bag.set_type(&mime_type_clone);
             if let Ok(blob) =
                 web_sys::Blob::new_with_blob_sequence_and_options(&blob_parts, &property_bag)
                 && let Some(window) = web_sys::window()
@@ -95,9 +139,10 @@ impl LocalRecorder {
                     .unwrap();
                 a.set_href(&url);
                 a.set_download(&format!(
-                    "{}-{}.webm",
+                    "{}-{}.{}",
                     filename_prefix_clone.borrow(),
-                    js_sys::Date::now()
+                    js_sys::Date::now(),
+                    extension_clone
                 ));
                 a.click();
                 // Delay revoking the object URL so the browser has time
@@ -148,6 +193,14 @@ impl LocalRecorder {
         *self.filename_prefix.borrow_mut() = prefix.into();
     }
 
+    /// The mime type the browser actually records with, as reported by
+    /// `MediaRecorder.mimeType` once recording has started. This is the type
+    /// used for the downloaded blob, so it reflects the real container even
+    /// when the browser ignored the requested one.
+    pub fn mime_type(&self) -> String {
+        self.recorder.mime_type()
+    }
+
     /// Stops recording. The `onstop` handler downloads the captured data.
     pub fn stop(&self) {
         let _ = self.recorder.stop();
@@ -180,33 +233,71 @@ mod tests {
 
     #[test]
     fn prefers_vp9_when_supported() {
-        let picked = pick_mime_type_with(|_| true);
+        let picked = pick_mime_type_with(|_| true, true);
         assert_eq!(picked, Some("video/webm;codecs=vp9,opus"));
     }
 
     #[test]
     fn falls_back_when_vp9_unsupported() {
-        let picked = pick_mime_type_with(|t| t != "video/webm;codecs=vp9,opus");
+        let picked = pick_mime_type_with(|t| t != "video/webm;codecs=vp9,opus", true);
         assert_eq!(picked, Some("video/webm;codecs=vp8,opus"));
     }
 
     #[test]
     fn falls_back_to_bare_webm() {
-        let picked = pick_mime_type_with(|t| !t.contains("codecs"));
+        let picked = pick_mime_type_with(|t| !t.contains("codecs"), true);
         assert_eq!(picked, Some("video/webm"));
     }
 
     #[test]
     fn returns_none_when_nothing_is_supported() {
-        assert_eq!(pick_mime_type_with(|_| false), None);
+        assert_eq!(pick_mime_type_with(|_| false, true), None);
+        assert_eq!(pick_mime_type_with(|_| false, false), None);
     }
 
     #[test]
     fn candidates_are_ordered_from_most_to_least_preferred() {
         // vp9 before vp8, and both before the bare container.
-        let vp9 = CANDIDATE_MIME_TYPES.iter().position(|t| t.contains("vp9"));
-        let vp8 = CANDIDATE_MIME_TYPES.iter().position(|t| t.contains("vp8"));
-        let bare = CANDIDATE_MIME_TYPES.iter().position(|t| *t == "video/webm");
+        let vp9 = VIDEO_MIME_TYPES.iter().position(|t| t.contains("vp9"));
+        let vp8 = VIDEO_MIME_TYPES.iter().position(|t| t.contains("vp8"));
+        let bare = VIDEO_MIME_TYPES.iter().position(|t| *t == "video/webm");
         assert!(vp9 < vp8 && vp8 < bare);
+    }
+
+    /// An audio-only stream must never be handed a video mime type, even when
+    /// the browser claims to support one: `isTypeSupported` is asked about the
+    /// type in isolation, not about this stream.
+    #[test]
+    fn audio_only_stream_never_selects_a_video_type() {
+        let picked = pick_mime_type_with(|_| true, false);
+        assert_eq!(picked, Some("audio/webm;codecs=opus"));
+
+        // Even with video types "supported", an audio-only stream must not pick
+        // one.
+        assert!(!picked.unwrap().starts_with("video/"));
+    }
+
+    #[test]
+    fn audio_only_falls_back_to_bare_audio_webm() {
+        let picked = pick_mime_type_with(|t| t == "audio/webm", false);
+        assert_eq!(picked, Some("audio/webm"));
+    }
+
+    #[test]
+    fn audio_only_does_not_use_video_candidates() {
+        // A browser that only reports video types as supported must yield None
+        // for an audio-only stream rather than a video type.
+        let picked = pick_mime_type_with(|t| t.starts_with("video/"), false);
+        assert_eq!(picked, None);
+    }
+
+    #[test]
+    fn extension_follows_the_container() {
+        assert_eq!(extension_for("video/webm;codecs=vp9,opus"), "webm");
+        assert_eq!(extension_for("audio/webm;codecs=opus"), "webm");
+        assert_eq!(extension_for("audio/webm"), "webm");
+        assert_eq!(extension_for("video/mp4"), "mp4");
+        // A malformed type must not produce an empty extension.
+        assert_eq!(extension_for(""), "webm");
     }
 }

@@ -49,6 +49,18 @@ impl VideoProcessor {
         let last_width: Rc<RefCell<u32>> = Rc::new(RefCell::new(0));
         let last_height: Rc<RefCell<u32>> = Rc::new(RefCell::new(0));
 
+        // Resolve and invoke captureStream before registering the interval. If
+        // this fails the constructor returns early, and a timer registered first
+        // would outlive the closure it points at: the browser would keep calling
+        // freed memory every 33 ms.
+        //
+        // capture_stream is not directly in web_sys for all browsers, use Reflect as fallback
+        let capture_stream = js_sys::Reflect::get(&canvas, &"captureStream".into())
+            .ok()
+            .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+            .ok_or_else(|| JsValue::from_str("Canvas captureStream not supported"))?;
+        let processed_stream = capture_stream.call0(&canvas)?.dyn_into::<MediaStream>()?;
+
         let closure = Closure::wrap(Box::new(move || {
             let width = video_clone.video_width() as f64;
             let height = video_clone.video_height() as f64;
@@ -97,15 +109,6 @@ impl VideoProcessor {
             closure.as_ref().unchecked_ref(),
             33, // ~30fps
         )?;
-
-        // capture_stream is not directly in web_sys for all browsers, use Reflect as fallback
-        let processed_stream =
-            if let Ok(func) = js_sys::Reflect::get(&canvas, &"captureStream".into()) {
-                let func = func.dyn_into::<js_sys::Function>()?;
-                func.call0(&canvas)?.dyn_into::<MediaStream>()?
-            } else {
-                return Err(JsValue::from_str("Canvas captureStream not supported"));
-            };
 
         // Canvas captureStream only contains video tracks. Copy audio tracks from the
         // original stream so that WebRTC peers still receive audio and mute/unmute
