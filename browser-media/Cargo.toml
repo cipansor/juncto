@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.88"
 description = "Ergonomic browser media capture for Rust/WASM: getUserMedia, screen share, virtual backgrounds, microphone level and voice-activity monitoring, and MediaRecorder download."
 license = "Apache-2.0"
+authors = ["Yayasan Pesantren Cipansor and the browser-media contributors"]
 repository = "https://github.com/cipansor/juncto"
 homepage = "https://github.com/cipansor/juncto/tree/main/browser-media"
 documentation = "https://docs.rs/browser-media"

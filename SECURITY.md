@@ -1,14 +1,18 @@
-# Security
+# Security Policy
 
 We take security seriously and develop all Juncto projects to be secure and safe.
 
 ## Reporting a vulnerability
 
-If you find — or simply suspect — a security issue in any Juncto project, please report it
-privately rather than in a public issue:
+Do not disclose security issues publicly.
 
-* **Email:** security@juncto.org
-* **HackerOne:** https://hackerone.com/juncto-bounty
+Report vulnerabilities through GitHub private vulnerability reporting, and track
+the resulting advisory on the repository's Security Advisories page:
+
+* **Report:** https://github.com/cipansor/juncto/security/advisories/new
+* **Advisories:** https://github.com/cipansor/juncto/security/advisories
+
+Please do not use public issues, pull requests, email or any other channel.
 
 Please include enough detail to reproduce the issue: the affected version or commit, the
 steps you took, and the impact you believe it has. We encourage responsible disclosure, so
