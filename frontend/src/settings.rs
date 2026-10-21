@@ -1,6 +1,6 @@
 use crate::components_ui::toast::{ToastType, use_toast};
 use crate::i18n::t;
-use crate::media::{enumerate_devices, get_user_media};
+use browser_media::{enumerate_devices, get_user_media};
 use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;

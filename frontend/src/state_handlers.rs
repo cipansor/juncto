@@ -1,9 +1,9 @@
 use crate::analytics::AnalyticsService;
 use crate::components_ui::toast::ToastType;
-use crate::media::AudioMonitor;
 use crate::remote_control::RemoteControlService;
 use crate::state::RoomConnectionState;
 use crate::webrtc::WebRTCManager;
+use browser_media::AudioMonitor;
 use leptos::prelude::*;
 use send_wrapper::SendWrapper;
 use shared::{ChatMessage, ClientMessage, DrawAction, Participant, Poll, ServerMessage};
@@ -52,8 +52,8 @@ pub struct HandlerContext {
     pub set_power_statuses: WriteSignal<HashMap<String, shared::PowerStatus>>,
     pub set_remote_streams: WriteSignal<HashMap<String, Vec<MediaStream>>>,
     pub is_recording_locally: ReadSignal<bool>,
-    pub local_recorder: SendWrapper<Rc<RefCell<Option<crate::media_recorder::LocalRecorder>>>>,
-    pub pending_recorders: SendWrapper<Rc<RefCell<Vec<crate::media_recorder::LocalRecorder>>>>,
+    pub local_recorder: SendWrapper<Rc<RefCell<Option<browser_media::LocalRecorder>>>>,
+    pub pending_recorders: SendWrapper<Rc<RefCell<Vec<browser_media::LocalRecorder>>>>,
     pub recording_stream_id: SendWrapper<Rc<RefCell<Option<String>>>>,
     pub set_is_recording_locally: WriteSignal<bool>,
     pub set_is_muted: WriteSignal<bool>,
