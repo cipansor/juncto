@@ -103,3 +103,6 @@ return a `JsValue` error instead of panicking. `AudioMonitor` needs
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+Copyright 2026 Yayasan Pesantren Cipansor and the browser-media contributors.
+See [NOTICE](NOTICE) for the full attribution.

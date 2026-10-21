@@ -118,8 +118,13 @@ A useful bug report includes:
 
 ## Security
 
-Please do not report security issues in a public issue. See [SECURITY.md](./SECURITY.md)
-for the private reporting channels.
+Do not report security issues in a public issue or pull request. See [SECURITY.md](./SECURITY.md)
+for the private reporting channel: GitHub private vulnerability reporting, tracked on the
+repository's Security Advisories page.
+
+By contributing, you agree that your contributions will be licensed under the Apache License,
+Version 2.0, and that the copyright is held by Yayasan Pesantren Cipansor and the juncto
+contributors.
 
 ## Community
 
