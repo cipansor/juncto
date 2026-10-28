@@ -234,10 +234,6 @@ commit conventions and the checks your pull request must pass.
 Copyright 2026 Yayasan Pesantren Cipansor and the juncto contributors.
 See [NOTICE](./NOTICE) for the full attribution.
 
-The project was originally contributed to the community under the MIT license
-(Copyright (c) 2013 ESTOS GmbH, Copyright (c) 2013 Juncto SARL). That notice is
-retained in full at the end of the LICENSE file.
-
 <br />
 
 <footer>
