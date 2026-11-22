@@ -285,6 +285,10 @@ pub enum ClientMessage {
     /// is stored on the room and required for subsequent joins. `None` locks
     /// without a password (joins are rejected outright).
     ToggleRoomLock(Option<String>),
+    /// Replace the password of an already-locked room without toggling the lock.
+    /// `None` (or an empty string) removes the password, making the lock a hard
+    /// lock that rejects every new join.
+    SetRoomPassword(Option<String>),
     ToggleRecording,
     ToggleAudioModeration,
     ToggleVideoModeration,

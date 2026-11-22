@@ -1,5 +1,19 @@
+use crate::i18n::t;
 use leptos::prelude::*;
 use shared::{Poll, PollOption};
+
+/// Returns the i18n key describing why a poll cannot be created, if it cannot.
+///
+/// Split out of the click handler so the rule is testable without a DOM.
+fn poll_form_error(question: &str, option1: &str, option2: &str) -> Option<&'static str> {
+    if question.trim().is_empty() {
+        Some("poll_error_question")
+    } else if option1.trim().is_empty() || option2.trim().is_empty() {
+        Some("poll_error_options")
+    } else {
+        None
+    }
+}
 
 #[component]
 pub fn PollsDialog(
@@ -18,10 +32,20 @@ pub fn PollsDialog(
     let (option1, set_option1) = signal("".to_string());
     let (option2, set_option2) = signal("".to_string());
 
+    let (form_error, set_form_error) = signal(Option::<String>::None);
+
     let create = move |_| {
         let q = question.get();
         let o1 = option1.get();
         let o2 = option2.get();
+
+        // The form previously did nothing at all on incomplete input, so a host
+        // could not tell a rejected click from a broken button.
+        if let Some(key) = poll_form_error(&q, &o1, &o2) {
+            set_form_error.set(Some(t(key)));
+            return;
+        }
+        set_form_error.set(None);
 
         if !q.is_empty() && !o1.is_empty() && !o2.is_empty() {
             let poll = Poll {
@@ -274,6 +298,11 @@ pub fn PollsDialog(
                                         placeholder="Option 2"
                                     />
                                 </div>
+                                <Show when=move || form_error.get().is_some()>
+                                    <p id="poll-form-error" style="color: #dc3545; font-size: 0.85rem; margin-bottom: 10px;">
+                                        {move || form_error.get().unwrap_or_default()}
+                                    </p>
+                                </Show>
                                 <button
                                     id="create-poll-submit-btn"
                                     class="btn btn-success btn-full"
@@ -323,5 +352,19 @@ mod tests {
         assert_eq!(active[0].id, "1");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, "2");
+    }
+
+    #[test]
+    fn an_incomplete_poll_names_what_is_missing() {
+        use super::poll_form_error;
+
+        assert_eq!(poll_form_error("Q", "a", "b"), None);
+        assert_eq!(poll_form_error("", "a", "b"), Some("poll_error_question"));
+        assert_eq!(
+            poll_form_error("   ", "a", "b"),
+            Some("poll_error_question")
+        );
+        assert_eq!(poll_form_error("Q", "", "b"), Some("poll_error_options"));
+        assert_eq!(poll_form_error("Q", "a", "  "), Some("poll_error_options"));
     }
 }

@@ -671,6 +671,16 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                 config.e2ee_enabled = !config.e2ee_enabled;
                                                 config.clone()
                                             };
+                                            // Mirror the room-wide flag onto every participant so a
+                                            // later ParticipantList (sent on each join) does not
+                                            // overwrite the client's synced lock icons with stale
+                                            // per-participant values.
+                                            {
+                                                let mut participants = participants_mutex.lock().unwrap();
+                                                for p in participants.values_mut() {
+                                                    p.e2ee_enabled = new_config.e2ee_enabled;
+                                                }
+                                            }
                                             let _ = tx.send(ServerMessage::RoomUpdated(new_config));
                                         }
                                     }
@@ -871,7 +881,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     });
 
                                     // Check if room is locked or lobby is enabled
-                                    let (is_locked, room_password, is_lobby, max_participants, host_exists) = {
+                                    let (
+                                        is_locked,
+                                        room_password,
+                                        is_lobby,
+                                        max_participants,
+                                        host_exists,
+                                        room_e2ee,
+                                    ) = {
                                         let config = room_config_mutex.lock().unwrap();
                                         (
                                             config.is_locked,
@@ -879,6 +896,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             config.is_lobby_enabled,
                                             config.max_participants,
                                             config.host_id.is_some(),
+                                            config.e2ee_enabled,
                                         )
                                     };
 
@@ -931,7 +949,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                         speaking_time: 0,
                                         presence: shared::PresenceStatus::Connected,
                                         is_visitor,
-                                        e2ee_enabled: false,
+                                        // Joiners inherit the room-wide E2EE state so their
+                                        // tile shows the lock icon without waiting for a
+                                        // further RoomUpdated broadcast.
+                                        e2ee_enabled: room_e2ee,
                                         hand_raised_at: None,
                                         avatar_url,
                                     };
@@ -1408,6 +1429,27 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                         }
                                     }
                                 },
+                                ClientMessage::SetRoomPassword(password) => {
+                                    if let Some(uid) = &my_id {
+                                        let is_host = {
+                                            room_config_mutex.lock().unwrap().host_id == Some(uid.clone())
+                                        };
+                                        if is_host {
+                                            let new_config = {
+                                                let mut config = room_config_mutex.lock().unwrap();
+                                                // Only meaningful while locked; a password on an
+                                                // unlocked room would never be enforced.
+                                                if config.is_locked {
+                                                    config.access_password =
+                                                        password.filter(|p| !p.trim().is_empty());
+                                                    config.has_password = config.access_password.is_some();
+                                                }
+                                                config.clone()
+                                            };
+                                            let _ = tx.send(ServerMessage::RoomUpdated(new_config));
+                                        }
+                                    }
+                                },
                                 ClientMessage::ToggleRecording => {
                                     if let Some(uid) = &my_id {
                                         let is_host = {
@@ -1668,6 +1710,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             room_config_mutex.lock().unwrap().host_id == Some(uid.clone())
                                         };
                                         if is_host {
+                                            // Only the host may broadcast, and only a URL the
+                                            // embed can actually render: anything else produces a
+                                            // blank tile for every participant with no feedback.
+                                            if !is_supported_share_video_url(&url) {
+                                                let _ = internal_tx.send(ServerMessage::Error(
+                                                    "Unsupported video URL: a YouTube link is required".to_string(),
+                                                )).await;
+                                                continue;
+                                            }
                                             {
                                                 let mut v = shared_video_mutex.lock().unwrap();
                                                 *v = Some(url.clone());
@@ -2450,6 +2501,43 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     }
 }
+/// Whether the shared-video embed can render this URL. Mirrors
+/// `frontend::components_ui::shared_video_dialog::youtube_video_id`; the server
+/// keeps its own copy so a client cannot broadcast an unrenderable tile.
+fn is_supported_share_video_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+        return false;
+    }
+    let Some((_, after_scheme)) = trimmed.split_once("://") else {
+        return false;
+    };
+    let (host, rest) = after_scheme.split_once('/').unwrap_or((after_scheme, ""));
+    let host = host.trim_start_matches("www.");
+    if !matches!(
+        host,
+        "youtube.com" | "m.youtube.com" | "youtu.be" | "youtube-nocookie.com"
+    ) {
+        return false;
+    }
+    let id = if host == "youtu.be" {
+        rest.split(['?', '#']).next().unwrap_or("")
+    } else if let Some((_, after)) = rest.split_once("v=") {
+        after.split(['&', '#']).next().unwrap_or("")
+    } else if let Some(after) = rest.strip_prefix("embed/") {
+        after.split(['?', '#']).next().unwrap_or("")
+    } else if let Some(after) = rest.strip_prefix("shorts/") {
+        after.split(['?', '#']).next().unwrap_or("")
+    } else {
+        ""
+    };
+    !id.is_empty()
+        && id.len() <= 32
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2709,5 +2797,34 @@ mod tests {
                 ..stale.clone()
             }
         ));
+    }
+
+    #[test]
+    fn share_video_urls_must_be_renderable_youtube_links() {
+        for good in [
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "https://www.youtube.com/embed/dQw4w9WgXcQ",
+            "https://m.youtube.com/watch?v=dQw4w9WgXcQ&t=10s",
+        ] {
+            assert!(
+                is_supported_share_video_url(good),
+                "expected accept for {good:?}"
+            );
+        }
+        for bad in [
+            "",
+            "not a url at all",
+            "javascript:alert(1)",
+            "https:/www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://example.com/watch?v=dQw4w9WgXcQ",
+            "https://www.youtube.com/watch",
+            "https://youtu.be/",
+        ] {
+            assert!(
+                !is_supported_share_video_url(bad),
+                "expected reject for {bad:?}"
+            );
+        }
     }
 }

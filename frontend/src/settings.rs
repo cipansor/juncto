@@ -1,6 +1,7 @@
 use crate::components_ui::toast::{ToastType, use_toast};
 use crate::i18n::t;
 use browser_media::{enumerate_devices, get_user_media};
+use leptos::ev;
 use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
@@ -36,6 +37,7 @@ pub fn SettingsDialog(
     #[prop(optional)] on_toggle_audio_only: Option<Callback<bool>>,
     #[prop(optional)] on_toggle_flip: Option<Callback<bool>>,
     #[prop(optional)] on_toggle_lock: Option<Callback<Option<String>>>,
+    #[prop(optional)] on_set_room_password: Option<Callback<Option<String>>>,
     #[prop(optional)] on_toggle_e2ee: Option<Callback<()>>,
     #[prop(optional)] on_toggle_audio_moderation: Option<Callback<()>>,
     #[prop(optional)] on_toggle_video_moderation: Option<Callback<()>>,
@@ -46,6 +48,15 @@ pub fn SettingsDialog(
 ) -> impl IntoView {
     let toast_ctx = use_toast();
     let (active_tab, set_active_tab) = signal("profile");
+
+    // Every other modal in the app closes on Escape; this one did not, which
+    // leaves keyboard users with no way out except the mouse.
+    let show_for_esc = show;
+    window_event_listener(ev::keydown, move |ev| {
+        if ev.key() == "Escape" && show_for_esc.get_untracked() {
+            on_close.run(());
+        }
+    });
 
     Effect::new(move |_| {
         if active_tab.get() == "moderator" && !is_host.map(|h| h.get()).unwrap_or(false) {
@@ -180,7 +191,7 @@ pub fn SettingsDialog(
                 set_preview_stream.set(Some(stream.clone()));
                 if let Some(video_el) = video_ref.get() {
                     video_el.set_src_object(Some(&stream));
-                    let _ = video_el.play();
+                    crate::utils::play_quietly(&video_el);
                 }
                 set_error_msg.set(None);
             }
@@ -630,6 +641,17 @@ pub fn SettingsDialog(
                                     id="lock-password-input"
                                     placeholder="Password (optional)"
                                     on:input=move |ev| set_lock_password.set(event_target_value(&ev))
+                                    on:change=move |_| {
+                                        // The lock toggle only fires on change, so a password
+                                        // typed after locking would never reach the server and
+                                        // every guest would be rejected for good.
+                                        if is_locked.map(|l| l.get()).unwrap_or(false)
+                                            && let Some(cb) = on_set_room_password
+                                        {
+                                            let pw = lock_password.get_untracked();
+                                            cb.run(if pw.trim().is_empty() { None } else { Some(pw) });
+                                        }
+                                    }
                                     prop:value=move || lock_password.get()
                                     style="margin-top: 8px; width: 100%;"
                                 />

@@ -401,6 +401,19 @@ pub fn Room() -> impl IntoView {
                                 on_feedback=Callback::new(move |_| state.set_show_feedback.set(true))
                                 on_embed=Callback::new(move |_| set_show_embed.set(true))
                                 on_raise_hand=state.toggle_raise_hand
+                                is_hand_raised=Signal::derive({
+                                    let participants = state.participants;
+                                    let my_id = state.my_id;
+                                    move || {
+                                        let me = my_id.get();
+                                        participants.with(|ps| {
+                                            ps.iter()
+                                                .find(|p| Some(p.id.clone()) == me)
+                                                .map(|p| p.is_hand_raised)
+                                                .unwrap_or(false)
+                                        })
+                                    }
+                                })
                                 on_screen_share=state.toggle_screen_share
                                 on_share_video=Callback::new(move |_| set_show_shared_video_dialog.set(true))
                                 on_stop_share_video=state.stop_share_video
@@ -562,6 +575,7 @@ pub fn Room() -> impl IntoView {
                                 on_toggle_audio_only=state.toggle_audio_only
                                 on_toggle_flip=state.toggle_flip
                             on_toggle_lock=state.toggle_lock
+                            on_set_room_password=state.set_room_password
                             on_toggle_e2ee=state.toggle_e2ee
                             on_toggle_audio_moderation=state.toggle_audio_moderation
                             on_toggle_video_moderation=state.toggle_video_moderation
