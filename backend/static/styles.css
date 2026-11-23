@@ -178,7 +178,12 @@ body {
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 12px 24px;
+    /* The notification bell is absolutely positioned over this bar's top-right
+       corner (`.capture-area` is its containing block), so the header yields
+       that corner to it. Without the reserve the last badge sat under the bell:
+       the 🔔 renders as a colour emoji on CI, and the badge's green text was
+       sampled against the bell's gold at 1.10:1. */
+    padding: 12px 72px 12px 24px;
     background: var(--bg-glass);
     backdrop-filter: var(--glass-backdrop);
     border-bottom: 1px solid var(--border-color);

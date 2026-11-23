@@ -242,6 +242,16 @@ shrinks (`min-width: 0`, `overflow: hidden`, `text-overflow: ellipsis`), and
 stay inside the viewport, with a room name long enough to overflow at every width so the
 verdict does not depend on font metrics.
 
+A second defect surfaced the same way. The notification bell is absolutely positioned
+over the top-right corner of `.capture-area`, which is exactly where the header's badges
+end. Nothing in the bar pushed it away, so the "🔔" covered the last few pixels of
+"Unlocked" — 7px at 1440, and on CI, where the emoji falls back to a wider font, the whole
+word. The badge's green text was then sampled against the bell's gold pixels and the audit
+reported 1.10:1 for text that is legible. The header now reserves that corner
+(`padding-right`), and `contrast-audit.spec.ts` scales the bell up to reproduce the CI font
+wherever it runs, asserting that no badge text is covered and that the header still scores
+above 3:1.
+
 Only rows inside the screenshot are read. A line below the fold has no pixels to measure,
 and reading past the last row yields `undefined` channels and a `NaN` ratio. A `NaN` does
 not survive to the assertion — `toBeGreaterThanOrEqual` rejects it — but it can vanish

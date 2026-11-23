@@ -205,4 +205,42 @@ test.describe('Dialog contrast audit', () => {
         );
         expect(await expectReadableText(page, '.room-header', 'room header', 3.0)).toBeGreaterThan(3.0);
     });
+
+    test('the notification bell does not sit on top of the header badges', async ({ page, request }) => {
+        // The bell is absolutely positioned over the top-right corner of
+        // `.capture-area`, which is where the header's badges end. It is the
+        // last thing in the bar, so nothing pushed it away: at 1440 the "🔔"
+        // covered the last 7px of "Unlocked", and on CI — where the emoji falls
+        // back to a wider font — it covered the whole word. The badge's green
+        // text was then sampled against the bell's gold pixels and the audit
+        // reported 1.10:1 for text that is legible.
+        //
+        // The bell is scaled up rather than relying on the CI font, so the
+        // overlap is reproduced wherever the test runs. The header reserves the
+        // corner (`padding-right`), so a wider bell still clears the badge.
+        await resetRoom(request);
+        await page.setViewportSize(DESKTOP);
+        await page.goto(`/room/Bell_${Date.now()}`);
+        await page.waitForSelector('#display-name');
+        await page.fill('#display-name', 'BellChecker');
+        await page.click('.join-btn');
+        await expect(page.locator('.room-container')).toBeVisible({ timeout: 20000 });
+        await page.waitForTimeout(1500);
+        await page.addStyleTag({ content: '#notif-bell-btn { font-size: 44px !important; }' });
+        await page.waitForTimeout(300);
+
+        const overlap = await page.evaluate(() => {
+            const badge = document.querySelector('.room-header .badge-success') as HTMLElement;
+            const bell = document.querySelector('#notif-bell-btn') as HTMLElement;
+            const range = document.createRange();
+            range.selectNodeContents(badge);
+            const text = range.getBoundingClientRect();
+            const box = bell.getBoundingClientRect();
+            const vertical = Math.min(text.bottom, box.bottom) - Math.max(text.top, box.top);
+            const horizontal = Math.min(text.right, box.right) - Math.max(text.left, box.left);
+            return vertical > 0 && horizontal > 0 ? horizontal : 0;
+        });
+        expect(overlap, 'the bell must not cover any badge text').toBe(0);
+        expect(await expectReadableText(page, '.room-header', 'room header', 3.0)).toBeGreaterThan(3.0);
+    });
 });
