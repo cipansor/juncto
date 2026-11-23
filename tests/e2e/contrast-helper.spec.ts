@@ -71,17 +71,33 @@ test.describe('contrast helper sampling', () => {
         );
     });
 
-    test('a backdrop that matches the text colour is not mistaken for glyphs', async ({ page }) => {
-        // The line is 70% white with a dark patch on the left; the text is white,
-        // so most of the letters are invisible. Sampling the painted text and
-        // discarding pixels that look like the text colour would delete the white
-        // backdrop, keep only the dark patch, and score 21:1. The honest answer
-        // is 1:1 for the letters that disappear.
+    test('scores the letters that sit on the unreadable part of a line', async ({ page }) => {
+        // Half the line is black, half is white, and the text is white: every
+        // letter over the white half is invisible. The split is painted on the
+        // text element itself so it stays at 50% however wide the font renders.
+        // Anchoring it to a separate fixed-width patch instead makes the verdict
+        // depend on font metrics: the same fixture rejected at letter-spacing
+        // 0px and passed at -2px, because the narrower run pushed most of the
+        // letters over the black half. That is a test of the font, not of the
+        // helper.
         await page.setContent(`
-            <div style="position:relative;width:400px;height:40px;background:#ffffff">
-              <div style="position:absolute;left:0;top:0;width:120px;height:40px;background:#000000"></div>
-              <p id="t" style="position:relative;margin:0;font:20px/40px sans-serif;color:#ffffff">invisible words</p>
-            </div>
+            <p id="t" style="margin:0;width:300px;font:20px/40px sans-serif;color:#ffffff;
+               background:linear-gradient(to right,#000000 0 50%,#ffffff 50% 100%)">invisible words over a split</p>
+        `);
+        await expect(expectReadableText(page, '#t', 'white on white', 3)).rejects.toThrow(
+            /contrast 1\.00 .* is below 3/,
+        );
+    });
+
+    test('a narrow unreadable band is not discarded for being small', async ({ page }) => {
+        // A white band only 2% wide crosses the text. It covers 4.3% of the
+        // glyph pixels, which is under any sensible "significant share"
+        // threshold, so a thresholded audit would score only the black and
+        // report 21:1. The letters over the band are still invisible, so the
+        // line has to fail. This is why no minimum share is applied.
+        await page.setContent(`
+            <p id="t" style="margin:0;width:600px;font:20px/40px sans-serif;color:#ffffff;
+               background:linear-gradient(to right,#000000 0 40%,#ffffff 40% 42%,#000000 42% 100%)">wide wide wide wide wide wide wide words here now</p>
         `);
         await expect(expectReadableText(page, '#t', 'white on white', 3)).rejects.toThrow(
             /contrast 1\.00 .* is below 3/,

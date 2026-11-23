@@ -136,62 +136,125 @@ export async function paintedBackdrops(page: Page, selector: string): Promise<Rg
     expect(await page.locator(selector).first().boundingBox(), `no layout box for ${selector}`).not.toBeNull();
     const rects = (await textRuns(page, selector)).flatMap((run) => run.rects);
     expect(rects.length, `no text line boxes for ${selector}`).toBeGreaterThan(0);
-    const shot = await screenshotWithoutText(page, selector);
+    const { painted, glyphs } = await glyphLayers(page, selector);
     return rects
-        .map((rect) => dominantBackdrop(shot, rect))
+        .map((rect) => dominantBackdrop(painted, glyphs, rect))
         .filter((rgb): rgb is Rgb => rgb !== null);
 }
 
 type Shot = { width: number; height: number; pixels: Buffer; channels: number };
 
+/** How close a pixel must be to the sentinel colour to count as glyph paint. */
+const SENTINEL_TOLERANCE = 40;
+
 /**
- * A screenshot of the element with its glyphs made transparent, so every pixel
- * in a line box is the surface behind the words.
- *
- * The alternative — sampling the screenshot with the text still painted and
- * discarding pixels that look like the text colour — cannot be made sound. A
- * backdrop that matches the text colour is exactly the unreadable case, so the
- * filter deletes the evidence: white text on a mostly-white line keeps only the
- * dark patch beside it and scores 21:1 while most of the letters are invisible.
- * Hiding the text removes the guess instead of tuning it.
+ * Colours used to paint the text when looking for its footprint. Each is
+ * checked against the rendered page first, and the first one that appears
+ * nowhere is used.
  */
-async function screenshotWithoutText(page: Page, selector: string): Promise<Shot> {
-    await page.evaluate((sel) => {
-        const el = document.querySelector(sel);
-        if (!el) return;
-        el.setAttribute('data-contrast-probe', '');
-        if (document.getElementById('contrast-probe-style')) return;
-        const style = document.createElement('style');
-        style.id = 'contrast-probe-style';
-        // `-webkit-text-fill-color` leaves the background, borders and shadows
-        // alone, which `color: transparent` would not: a `background: currentColor`
-        // would vanish and change the very surface being measured.
-        style.textContent =
-            '[data-contrast-probe], [data-contrast-probe] * { -webkit-text-fill-color: transparent !important; }';
-        document.head.appendChild(style);
-    }, selector);
+const SENTINEL_CANDIDATES: Rgb[] = [
+    [255, 0, 255],
+    [0, 255, 0],
+    [0, 255, 255],
+    [255, 255, 0],
+    [255, 0, 0],
+    [0, 0, 255],
+];
+
+/**
+ * The surface behind the glyphs, plus a mask of which pixels a glyph covers.
+ *
+ * Two screenshots: one with the text made transparent, which is the true
+ * surface, and one with the text painted in a colour that occurs nowhere on the
+ * page, which marks the glyph footprint. The mask is then "pixels painted in the
+ * sentinel colour", so it does not depend on the text's own colour or on the
+ * backdrop.
+ *
+ * Diffing the two screenshots would be the obvious shortcut and it is wrong: a
+ * glyph painted the same colour as its backdrop changes no pixel, so the mask
+ * would be blind exactly where the text is invisible — the case the audit exists
+ * for. Picking the sentinel as "the colour farthest from the backdrop" fails the
+ * same way, because a glyph already painted that colour is a no-op.
+ */
+async function glyphLayers(page: Page, selector: string): Promise<{ painted: Shot; glyphs: Uint8Array }> {
+    const applyFill = async (fill: string | null) => {
+        const ok = await page.evaluate(
+            ([sel, value]) => {
+                const el = document.querySelector(sel as string);
+                if (!el) return false;
+                const id = 'contrast-probe-style';
+                let style = document.getElementById(id) as HTMLStyleElement | null;
+                if (!style) {
+                    style = document.createElement('style');
+                    style.id = id;
+                    document.head.appendChild(style);
+                }
+                if (value === null) {
+                    el.removeAttribute('data-contrast-probe');
+                    style.textContent = '';
+                    return true;
+                }
+                el.setAttribute('data-contrast-probe', '');
+                // `-webkit-text-fill-color` leaves the background, borders and
+                // shadows alone, which `color` would not: a `background:
+                // currentColor` would vanish and change the very surface being
+                // measured.
+                style.textContent = `[data-contrast-probe], [data-contrast-probe] * { -webkit-text-fill-color: ${value} !important; }`;
+                return true;
+            },
+            [selector, fill] as [string, string | null],
+        );
+        return ok;
+    };
+
     try {
-        return decodePng(await page.screenshot());
+        if (!(await applyFill('transparent'))) return { painted: decodePng(await page.screenshot()), glyphs: new Uint8Array(0) };
+        const painted = decodePng(await page.screenshot());
+        const sentinel = pickSentinel(painted);
+        await applyFill(`rgb(${sentinel.join(', ')})`);
+        const withText = decodePng(await page.screenshot());
+
+        const glyphs = new Uint8Array(withText.width * withText.height);
+        for (let i = 0; i < glyphs.length; i += 1) {
+            const o = i * withText.channels;
+            const distance =
+                Math.abs(withText.pixels[o] - sentinel[0]) +
+                Math.abs(withText.pixels[o + 1] - sentinel[1]) +
+                Math.abs(withText.pixels[o + 2] - sentinel[2]);
+            if (distance <= SENTINEL_TOLERANCE) glyphs[i] = 1;
+        }
+        return { painted, glyphs };
     } finally {
-        await page.evaluate((sel) => {
-            document.querySelector(sel)?.removeAttribute('data-contrast-probe');
-        }, selector);
+        await applyFill(null);
     }
 }
 
+/** A colour that appears nowhere in the screenshot, so painted text is unambiguous. */
+function pickSentinel(shot: Shot): Rgb {
+    const present = new Set<string>();
+    for (let i = 0; i < shot.width * shot.height; i += 1) {
+        const o = i * shot.channels;
+        present.add(`${shot.pixels[o]},${shot.pixels[o + 1]},${shot.pixels[o + 2]}`);
+    }
+    return SENTINEL_CANDIDATES.find((c) => !present.has(c.join(','))) ?? SENTINEL_CANDIDATES[0];
+}
+
 /**
- * Every backdrop colour under a line box, with how much of the box it covers.
+ * Every backdrop colour under a line box's glyphs, most common first.
  *
- * Only the visible part of the box is read: a line below the fold is not on the
- * screenshot, and reading past the last row yields `undefined` channel values,
- * which turn into a `NaN` ratio rather than a measurement.
+ * Only glyph pixels are counted, so the result does not depend on how much
+ * empty space the line box happens to contain. Only rows inside the screenshot
+ * are read: a line below the fold has no pixels, and reading past the last row
+ * yields `undefined` channels and a `NaN` ratio.
  */
-function backdropsForRect(shot: Shot, rect: { x: number; y: number; width: number; height: number }) {
-    const { width, height, pixels, channels } = shot;
-    // The vertical middle of a line box passes through the glyphs; the padding
-    // above and below the text does not.
-    const y0 = Math.max(0, Math.floor(rect.y + rect.height * 0.3));
-    const y1 = Math.min(Math.floor(rect.y + rect.height * 0.7), Math.floor(rect.y + rect.height), height - 1);
+function backdropsForRect(
+    painted: Shot,
+    glyphs: Uint8Array,
+    rect: { x: number; y: number; width: number; height: number },
+) {
+    const { width, height, pixels, channels } = painted;
+    const y0 = Math.max(0, Math.floor(rect.y));
+    const y1 = Math.min(Math.floor(rect.y + rect.height), height - 1);
     const x0 = Math.max(0, Math.floor(rect.x));
     const x1 = Math.min(Math.floor(rect.x + rect.width), width - 1);
     if (x1 < x0 || y1 < y0) return [];
@@ -200,7 +263,9 @@ function backdropsForRect(shot: Shot, rect: { x: number; y: number; width: numbe
     let total = 0;
     for (let y = y0; y <= y1; y += 1) {
         for (let x = x0; x <= x1; x += 1) {
-            const o = (y * width + x) * channels;
+            const i = y * width + x;
+            if (glyphs[i] !== 1) continue;
+            const o = i * channels;
             const rgb: Rgb = [pixels[o], pixels[o + 1], pixels[o + 2]];
             const key = rgb.join(',');
             const entry = counts.get(key);
@@ -209,18 +274,21 @@ function backdropsForRect(shot: Shot, rect: { x: number; y: number; width: numbe
             total += 1;
         }
     }
+    if (total === 0) return [];
     return [...counts.values()]
         .map((entry) => ({ rgb: entry.rgb, share: entry.count / total }))
-        .sort((a, b) => b.share - a.share);
+        .sort((a, b) => b.share - a.share)
+        .map((entry) => entry.rgb);
 }
 
-/** The colour behind most of the letters on this line, or null if it is offscreen. */
-function dominantBackdrop(shot: Shot, rect: { x: number; y: number; width: number; height: number }): Rgb | null {
-    return backdropsForRect(shot, rect)[0]?.rgb ?? null;
+/** The colour behind most of the letters on this line, or null if none are visible. */
+function dominantBackdrop(
+    painted: Shot,
+    glyphs: Uint8Array,
+    rect: { x: number; y: number; width: number; height: number },
+): Rgb | null {
+    return backdropsForRect(painted, glyphs, rect)[0] ?? null;
 }
-
-/** Share of a line box a colour must cover before it can hide the text there. */
-const SIGNIFICANT_SHARE = 0.1;
 
 /**
  * Assert every run of text inside the element clears the WCAG AA contrast floor
@@ -229,10 +297,9 @@ const SIGNIFICANT_SHARE = 0.1;
  *
  * Colour is read per run, so a container holding a white heading, a muted label
  * and a dark-on-light button is measured three times with the colour each is
- * painted in. Within a line, every colour covering at least a tenth of the box
- * is scored and the worst wins: a line that is mostly white with a dark patch
- * is unreadable for the letters over the white, even though the patch alone
- * would score well.
+ * painted in. Within a line, every backdrop under the glyphs is scored and the
+ * worst wins: a line whose letters are partly over a light patch is unreadable
+ * for those letters, even though the rest of the line scores well.
  */
 export async function expectReadableText(
     page: Page,
@@ -243,7 +310,7 @@ export async function expectReadableText(
     const runs = await textRuns(page, selector);
     expect(runs.length, `no text inside ${label}`).toBeGreaterThan(0);
 
-    const shot = await screenshotWithoutText(page, selector);
+    const { painted, glyphs } = await glyphLayers(page, selector);
 
     let worst: { ratio: number; color: string; bg: Rgb } | null = null;
     let measured = 0;
@@ -252,15 +319,18 @@ export async function expectReadableText(
         if (!fg) continue;
         const rgb: Rgb = [fg[0], fg[1], fg[2]];
         for (const rect of run.rects) {
-            const backdrops = backdropsForRect(shot, rect);
-            if (backdrops.length === 0) continue; // Offscreen: nothing to measure.
+            const backdrops = backdropsForRect(painted, glyphs, rect);
+            if (backdrops.length === 0) continue; // No visible glyphs on this line.
             measured += 1;
-            const scoring = backdrops.filter((b) => b.share >= SIGNIFICANT_SHARE);
-            for (const bg of scoring.length > 0 ? scoring : backdrops.slice(0, 1)) {
-                const ratio = contrastRatio(rgb, bg.rgb);
+            // Every colour under the letters is scored, with no minimum share.
+            // A share threshold is a false-pass by construction: text crossing a
+            // narrow unreadable band is exactly the case that matters, and the
+            // band is precisely what a threshold discards.
+            for (const bg of backdrops) {
+                const ratio = contrastRatio(rgb, bg);
                 expect(Number.isFinite(ratio), `${label}: non-finite contrast`).toBe(true);
                 if (worst === null || ratio < worst.ratio) {
-                    worst = { ratio, color: run.color, bg: bg.rgb };
+                    worst = { ratio, color: run.color, bg };
                 }
             }
         }

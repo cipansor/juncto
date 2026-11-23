@@ -178,16 +178,19 @@ card over the gradient users see. Four details make the sample honest:
   message in a wide paragraph is measured where the glyphs are, not where the box happens
   to be empty. A gradient crossing the text yields one surface per line and the worst line
   decides.
-* **Every significant colour, worst wins.** Within a line, each colour covering at least a
-  tenth of the box is scored and the lowest ratio is reported. Taking only the commonest
-  colour would let a dark patch under a minority of the letters hide a light backdrop under
-  the rest.
+* **Every colour under the glyphs, worst wins.** Within a line, each colour painted under
+  the letters is scored and the lowest ratio is reported. There is no minimum share: a
+  narrow unreadable band is exactly the case that matters, and a threshold discards
+  precisely that. A share also depends on how wide the font renders, so a thresholded
+  audit can change verdict between machines.
 
 Only rows inside the screenshot are read. A line below the fold has no pixels to measure,
-and reading past the last row yields `undefined` channels and a `NaN` ratio — which passes
-every `toBeGreaterThanOrEqual` assertion, so an unmeasured line would silently count as
-readable. Offscreen lines are skipped, and an element with nothing visible to measure fails
-with `no visible text line to measure`.
+and reading past the last row yields `undefined` channels and a `NaN` ratio. A `NaN` does
+not survive to the assertion — `toBeGreaterThanOrEqual` rejects it — but it can vanish
+first, because the worst-score selection compares with `<`, which is false for `NaN`, so a
+`NaN` line is skipped and never becomes the reported worst. The line would then be counted
+as measured without being scored. Offscreen lines are skipped explicitly, and an element
+with nothing visible to measure fails with `no visible text line to measure`.
 
 This exists because the React → Rust cutover left several dialogs with browser-default text
 on a white panel: legible in a diff, invisible on screen, and easy to miss even in a
