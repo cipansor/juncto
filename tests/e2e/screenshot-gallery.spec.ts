@@ -30,6 +30,36 @@ function expectUniqueScreenshotNumbers(names: string[]) {
     ).toEqual([]);
 }
 
+/**
+ * Every view the gallery must produce. Several captures are conditional (the
+ * lobby, the rejoin overlay, the context menu, the mobile settings dialog), and
+ * a conditional capture that never happens is simply absent from `captured`, so
+ * a uniqueness check alone accepts the run. README.md links all of these, so a
+ * missing one is a broken image in the docs.
+ */
+const REQUIRED_SHOTS = [
+    '01-home', '02-prejoin', '03-room', '04-participants', '05-chat',
+    '06-settings-profile', '07-settings-devices', '08-settings-integrations',
+    '09-settings-more', '10-settings-branding', '11-polls-create',
+    '12-polls-active', '13-notifications', '14-whiteboard',
+    '15-virtual-background', '16-shortcuts', '17-speaker-stats', '18-invite',
+    '19-share-video', '20-embed-meeting', '21-dial-in', '22-salesforce',
+    '23-feedback', '24-authentication', '25-calendar', '26-etherpad',
+    '27-files', '28-reactions', '29-subtitles', '30-context-menu',
+    '31-breakout-rooms', '32-remote-control', '33-room-chat-open',
+    '34-visitor-mode', '35-lobby', '36-rejoin-overlay', '37-mobile-home',
+    '38-mobile-prejoin', '39-mobile-room', '40-mobile-chat',
+    '41-mobile-settings', '42-settings-moderator',
+] as const;
+
+function expectEveryViewCaptured(captured: string[]) {
+    const missing = REQUIRED_SHOTS.filter((name) => !captured.includes(name));
+    expect(
+        missing,
+        `the gallery did not capture: ${missing.join(', ')}`,
+    ).toEqual([]);
+}
+
 const DESKTOP = { width: 1440, height: 900 };
 const MOBILE = { width: 420, height: 860 };
 
@@ -486,8 +516,10 @@ test.describe('UI screenshot gallery', () => {
 
     test.afterAll(() => {
         // Runs even when a capture fails partway, so a run that writes the same
-        // number twice is reported rather than left for a reviewer to spot.
+        // number twice, or skips a view entirely, is reported rather than left
+        // for a reviewer to spot.
         expectUniqueScreenshotNumbers(captured);
+        expectEveryViewCaptured(captured);
     });
 });
 

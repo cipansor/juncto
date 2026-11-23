@@ -121,9 +121,24 @@ cd tests/e2e && npx playwright test screenshot-gallery.spec.ts
 
 The file names are ordered and stable (`01-home.png` … `42-settings-moderator.png`). If you
 add a screen, append the next number; if you renumber, update the README tables in the same
-commit. Screens that depend on timing (the lobby, the reconnect overlay) are captured
-behind an explicit visibility check and are skipped with an annotation rather than failing
-the suite when the state cannot be reached.
+commit.
+
+Every capture goes through a `capture()` helper that records the name as it is written, and
+two assertions run in `afterAll`:
+
+* **No duplicate numbers** — a repeated prefix makes the gallery order ambiguous and
+  collides in the README tables. Checking the output directory cannot catch this (a clean
+  checkout has no files, and two same-named captures leave one file behind), so the names
+  are recorded as they are written instead.
+* **No missing screens** — `REQUIRED_SHOTS` lists every view the gallery must produce.
+  Several captures are conditional (the lobby, the reconnect overlay, the context menu,
+  the mobile settings dialog) and skip themselves when the state cannot be reached; without
+  the manifest a skipped capture is simply absent and the run still passes, leaving a
+  broken image in the README.
+
+Screens that depend on timing are still skipped with an annotation rather than failing on
+the spot, but a skip now fails the run at the end. When that happens, the fix is to make the
+state reachable, not to drop the entry from `REQUIRED_SHOTS`.
 
 Two of the captures need setup worth knowing about:
 
@@ -135,10 +150,27 @@ Two of the captures need setup worth knowing about:
 
 ### The contrast audit
 
-`contrast-audit.spec.ts` opens every dialog and measures the contrast ratio between the
-resolved text colour and the effective backdrop, computed by compositing translucent
-backgrounds up the ancestor chain. It fails when any dialog drops below the WCAG AA floor
-(3:1 for large text — the headings and labels here) or renders on a near-white surface.
+`contrast-audit.spec.ts` opens every dialog and measures the contrast ratio between each
+run of text and the surface actually painted behind it. It fails when any dialog drops below
+the WCAG AA floor (3:1 for large text — the headings and labels here) or renders on a
+near-white surface.
+
+The shared helper (`contrast.ts`) samples the rendered pixels rather than reconstructing the
+backdrop from CSS, because a `background-color` walk cannot see what the browser composites:
+the landing page paints a radial gradient in `background-image` behind a translucent card
+with `backdrop-filter`, so a reconstructed colour would be the card over the body, not the
+card over the gradient users see. Three details make the sample honest:
+
+* **Per text run.** Colour is read per text node, not from the audited element. The audit
+  target is often a container — `.chat-container` holds a white heading, a muted label and a
+  white-on-blue button — and comparing the container's colour with the button's backdrop
+  measures nothing real.
+* **Per line box.** The sample is restricted to the text's own line boxes, so a short
+  message in a wide paragraph is measured where the glyphs are, not where the box happens
+  to be empty. A gradient crossing the text yields one surface per line and the worst line
+  decides.
+* **Glyph pixels excluded.** Bold or large text can cover most of its own line box, which
+  would otherwise report the element as unreadable against its own colour.
 
 This exists because the React → Rust cutover left several dialogs with browser-default text
 on a white panel: legible in a diff, invisible on screen, and easy to miss even in a
