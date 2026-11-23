@@ -134,6 +134,10 @@ test.describe('Shared Video validation', () => {
 
             // The error is shown and nothing was broadcast.
             await expect(page.locator('#shared-video-error')).toBeVisible();
+            // Inside a dialog the paragraph rule outranks `.form-error` unless
+            // it excludes it, so the text would not be red.
+            await expect(page.locator('#shared-video-error'))
+                .toHaveCSS('color', 'rgb(239, 68, 68)');
             await expect(page.locator('h3:has-text("Share Video")')).toBeVisible();
             await expect(page.locator('.shared-video')).toHaveCount(0);
             await context.close();

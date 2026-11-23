@@ -585,3 +585,67 @@ fn youtube_ids_reject_non_url_safe_characters() {
         None
     );
 }
+
+#[test]
+fn pathless_youtube_urls_are_rejected_even_with_a_v_parameter() {
+    use crate::youtube_video_id;
+
+    // Regression: the parser scanned the whole URL for `v=`, so the homepage
+    // with a fragment (or a query) parsed as a watch page and embedded a video
+    // for a link that is not a video page.
+    for url in [
+        "https://www.youtube.com#v=dQw4w9WgXcQ",
+        "https://www.youtube.com?v=dQw4w9WgXcQ",
+        "https://www.youtube.com/?v=dQw4w9WgXcQ",
+        "https://www.youtube.com/#v=dQw4w9WgXcQ",
+        "https://m.youtube.com#v=dQw4w9WgXcQ",
+        "https://youtu.be#v=dQw4w9WgXcQ",
+        "https://www.youtube.com/feed/subscriptions?v=dQw4w9WgXcQ",
+    ] {
+        assert_eq!(youtube_video_id(url), None, "expected reject for {url:?}");
+    }
+}
+
+#[test]
+fn watch_ids_come_from_the_query_not_the_fragment() {
+    use crate::youtube_video_id;
+
+    // `v` must be an exact query key on the watch route.
+    assert_eq!(
+        youtube_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ#t=10").as_deref(),
+        Some("dQw4w9WgXcQ")
+    );
+    // A fragment is not a query: `#v=` on the watch path has no id.
+    assert_eq!(
+        youtube_video_id("https://www.youtube.com/watch#v=dQw4w9WgXcQ"),
+        None
+    );
+    // `v` inside another key's value must not count.
+    assert_eq!(
+        youtube_video_id("https://www.youtube.com/watch?list=x&vv=dQw4w9WgXcQ"),
+        None
+    );
+    assert_eq!(
+        youtube_video_id("https://www.youtube.com/watch?list=v=dQw4w9WgXcQ"),
+        None
+    );
+}
+
+#[test]
+fn path_routes_do_not_accept_an_id_through_the_query() {
+    use crate::youtube_video_id;
+
+    for url in [
+        "https://www.youtube.com/embed?v=dQw4w9WgXcQ",
+        "https://www.youtube.com/shorts?v=dQw4w9WgXcQ",
+        "https://www.youtube.com/live?v=dQw4w9WgXcQ",
+        "https://www.youtube.com/embed/dQw4w9WgXcQ/extra",
+    ] {
+        assert_eq!(youtube_video_id(url), None, "expected reject for {url:?}");
+    }
+    // A trailing slash on a path-id route is still the same video.
+    assert_eq!(
+        youtube_video_id("https://www.youtube.com/embed/dQw4w9WgXcQ/").as_deref(),
+        Some("dQw4w9WgXcQ")
+    );
+}

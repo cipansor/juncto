@@ -1037,7 +1037,7 @@ body {
     color: #ffffff;
 }
 
-.hero-card p {
+.hero-card p:not(.form-error) {
     color: var(--text-muted);
     font-size: var(--font-size-sm);
     margin-bottom: 24px;
@@ -1122,7 +1122,11 @@ body {
     color: var(--text-primary);
 }
 
-.modal-content p, .dialog-content p, .login-dialog p, .calendar-list-dialog p, .rejoin-dialog p {
+/* `:not(.form-error)` keeps validation text on its own colour: a paragraph
+   rule is more specific than `.form-error` alone and would win otherwise. */
+.modal-content p:not(.form-error), .dialog-content p:not(.form-error),
+.login-dialog p:not(.form-error), .calendar-list-dialog p:not(.form-error),
+.rejoin-dialog p:not(.form-error) {
     color: var(--text-secondary);
     line-height: 1.5;
 }
@@ -1366,7 +1370,7 @@ body {
     color: var(--text-primary);
 }
 
-.lobby-card p {
+.lobby-card p:not(.form-error) {
     color: var(--text-secondary);
     line-height: 1.6;
 }
@@ -1399,7 +1403,7 @@ body {
 
 /* Inline form validation message. Uses theme tokens so it stays legible when
    the palette changes; do not reintroduce literal colours in markup. */
-.form-error {
+p.form-error, .form-error {
     color: var(--danger-color);
     font-size: var(--font-size-xs);
     margin-top: 6px;

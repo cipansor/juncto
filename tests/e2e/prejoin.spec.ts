@@ -94,5 +94,8 @@ test.describe('Home form validation', () => {
         await expect(error).toHaveClass(/form-error/);
         // Colours come from the stylesheet, not inline attributes.
         await expect(error).not.toHaveAttribute('style', /color/);
+        // Regression: `.hero-card p` is more specific than `.form-error` alone,
+        // so the message rendered in the muted body colour, not the danger one.
+        await expect(error).toHaveCSS('color', 'rgb(239, 68, 68)');
     });
 });

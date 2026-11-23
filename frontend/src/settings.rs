@@ -9,6 +9,39 @@ use web_sys::{MediaDeviceInfo, MediaDeviceKind};
 
 pub type DeviceSettings = (Option<String>, Option<String>, String, bool);
 
+/// A password as the server stores it: whitespace-only drafts mean "no
+/// password", anything else is kept byte-for-byte.
+///
+/// Trimming a non-blank draft would change the secret. The guest types what
+/// the host shared, and the server compares exactly, so `" planning42 "` must
+/// stay `" planning42 "` — trimming it makes the shared password fail.
+pub fn normalize_password(draft: &str) -> Option<String> {
+    if draft.trim().is_empty() {
+        None
+    } else {
+        Some(draft.to_string())
+    }
+}
+
+/// Whether the draft would change what the server holds.
+///
+/// This is the single predicate behind Apply, Enter and the unsaved hint, so
+/// the three can never disagree about whether there is something to save.
+/// `known` is the value the client believes is stored, or `None` when a
+/// password exists but its value was never seen (`has_password`).
+///
+/// An empty draft is a real removal whenever a password exists — including one
+/// whose value is unknown — otherwise a host could not clear a password that
+/// was set through the lock toggle.
+pub fn password_differs(draft: &str, known: &Option<String>, has_password: bool) -> bool {
+    match (normalize_password(draft), known) {
+        (None, None) => has_password,
+        (None, Some(_)) => true,
+        (Some(_), None) => true,
+        (Some(draft), Some(known)) => draft != *known,
+    }
+}
+
 #[component]
 pub fn SettingsDialog(
     show: ReadSignal<bool>,
@@ -116,35 +149,69 @@ pub fn SettingsDialog(
     let (selected_audio, set_selected_audio) = signal(init_audio);
     let (video_quality, set_video_quality) = signal(init_res);
     let (lock_password, set_lock_password) = signal(String::new());
-    // The password the server is known to hold. Kept apart from the input text
-    // so a draft that was never applied cannot look saved.
-    let (saved_password, set_saved_password) = signal(String::new());
+    // What the client believes the server holds, or `None` when the server has
+    // a password whose value we never see. The toggle and the unlock path both
+    // change the stored password server-side, so this is re-synced whenever the
+    // room's lock state or password presence changes; a stale baseline makes a
+    // real change look like no change and disables Apply.
+    let (saved_password, set_saved_password) = signal(Option::<String>::None);
+    // Tracked reads: these feed the Apply button, the unsaved hint and the
+    // guidance text, all of which must re-render when the lock or password
+    // state changes. Untracked reads here left the dialog showing the state it
+    // had when it was first opened.
+    let locked_now = move || is_locked.map(|l| l.get()).unwrap_or(false);
+    let server_has_password = move || {
+        has_password
+            .map(|h| h.get())
+            .unwrap_or_else(|| saved_password.get().is_some())
+    };
+
+    // Adopt the server's view after a transition the client did not make
+    // itself: the toggle (which stores the draft and drops it on unlock) and
+    // any other client's change. Without this, unlocking clears the server
+    // password but the local baseline still holds the old value, so typing
+    // that same password after a relock compares equal and Apply stays dead.
+    //
+    // Both reads are tracked, so this re-runs on every lock or password change.
+    Effect::new(move |_| {
+        let locked = is_locked.map(|l| l.get()).unwrap_or(false);
+        let has_pw = has_password.map(|h| h.get()).unwrap_or(false);
+        let known_is_stale = if locked {
+            // A known value survives a relock only if the server still has a
+            // password; otherwise what we hold is no longer what it has.
+            !has_pw
+        } else {
+            // Unlocking always clears the stored password.
+            true
+        };
+        if known_is_stale {
+            set_saved_password.set(None);
+        }
+    });
+
     // Pushing the password to the server is an explicit action rather than a
     // side effect of blur. Closing the dialog (Escape, the ×, or clicking the
     // overlay) removes the focused input, and Firefox does not fire `change`
     // for a removed element — so a typed password was silently discarded and
     // every guest stayed locked out.
-    //
-    // Only meaningful while locked: the server ignores a password on an
-    // unlocked room, and the lock toggle carries the draft with it.
     let apply_password = move || {
         let Some(cb) = on_set_room_password else {
             return;
         };
-        if !is_locked.map(|l| l.get_untracked()).unwrap_or(false) {
+        if !locked_now() {
             return;
         }
-        let pw = lock_password.get_untracked().trim().to_string();
-        if pw == saved_password.get_untracked() {
+        let draft = lock_password.get_untracked();
+        if !password_differs(
+            &draft,
+            &saved_password.get_untracked(),
+            server_has_password(),
+        ) {
             return;
         }
-        cb.run(if pw.is_empty() {
-            None
-        } else {
-            Some(pw.clone())
-        });
-        set_saved_password.set(pw.clone());
-        set_lock_password.set(pw);
+        let next = normalize_password(&draft);
+        cb.run(next.clone());
+        set_saved_password.set(next);
     };
 
     let (noise_suppression, set_noise_suppression) = signal(
@@ -669,8 +736,11 @@ pub fn SettingsDialog(
                                         prop:checked=move || is_locked.map(|l| l.get()).unwrap_or(false)
                                         on:change=move |_| {
                                             if let Some(cb) = on_toggle_lock {
-                                                let pw = lock_password.get_untracked();
-                                                cb.run(if pw.trim().is_empty() { None } else { Some(pw) });
+                                                let pw = normalize_password(&lock_password.get_untracked());
+                                                // The toggle stores the draft, so the
+                                                // server now holds exactly this.
+                                                set_saved_password.set(pw.clone());
+                                                cb.run(pw);
                                             }
                                         }
                                         style="margin-right: 10px;"
@@ -695,18 +765,24 @@ pub fn SettingsDialog(
                                     id="apply-password-btn"
                                     class="btn btn-secondary"
                                     prop:disabled=move || {
-                                        !is_locked.map(|l| l.get()).unwrap_or(false)
-                                            || lock_password.get().trim()
-                                                == saved_password.get().trim()
+                                        !locked_now()
+                                            || !password_differs(
+                                                &lock_password.get(),
+                                                &saved_password.get(),
+                                                server_has_password(),
+                                            )
                                     }
                                     on:click=move |_| apply_password()
                                 >
                                     "Apply Password"
                                 </button>
                                 <Show when=move || {
-                                    is_locked.map(|l| l.get()).unwrap_or(false)
-                                        && lock_password.get().trim()
-                                            != saved_password.get().trim()
+                                    locked_now()
+                                        && password_differs(
+                                            &lock_password.get(),
+                                            &saved_password.get(),
+                                            server_has_password(),
+                                        )
                                 }>
                                     <p id="password-unsaved" class="settings-hint" style="margin-top: 4px;">
                                         "Press Apply Password to save this change."
@@ -714,10 +790,8 @@ pub fn SettingsDialog(
                                 </Show>
                                 <p class="settings-hint" style="margin-top: 4px;">
                                     {move || {
-                                        if is_locked.map(|l| l.get()).unwrap_or(false) {
-                                            let known = !saved_password.get().is_empty()
-                                                || has_password.map(|h| h.get()).unwrap_or(false);
-                                            if known {
+                                        if locked_now() {
+                                            if server_has_password() {
                                                 "Guests need this password to join. Clear it and press Apply to keep the room closed."
                                             } else {
                                                 "The room is locked without a password, so nobody can join. Apply a password to let guests in."
@@ -837,5 +911,67 @@ mod tests {
     fn test_device_settings_with_noise_suppression() {
         let settings: DeviceSettings = (None, None, "hd".to_string(), true);
         assert!(settings.3);
+    }
+
+    #[test]
+    fn normalize_password_keeps_significant_spaces() {
+        // Regression: trimming a non-blank draft changed the secret, so a guest
+        // pasting the password the host shared was rejected.
+        assert_eq!(
+            normalize_password(" planning42 "),
+            Some(" planning42 ".to_string())
+        );
+        assert_eq!(normalize_password("a b"), Some("a b".to_string()));
+        // Only whitespace-only drafts mean "no password".
+        assert_eq!(normalize_password(""), None);
+        assert_eq!(normalize_password("   "), None);
+        assert_eq!(normalize_password("\t\n"), None);
+    }
+
+    #[test]
+    fn password_differs_treats_an_unknown_stored_password_as_a_change() {
+        // The server has a password but the client never sees its value, so any
+        // non-empty draft is a change and an empty draft is a real removal.
+        assert!(password_differs("meeting42", &None, true));
+        assert!(password_differs("", &None, true));
+        assert!(password_differs("   ", &None, true));
+        // Nothing stored and nothing typed: nothing to save.
+        assert!(!password_differs("", &None, false));
+        assert!(!password_differs("   ", &None, false));
+    }
+
+    #[test]
+    fn password_differs_compares_against_a_known_value() {
+        let known = Some("meeting42".to_string());
+        assert!(!password_differs("meeting42", &known, true));
+        assert!(password_differs("meeting43", &known, true));
+        // Clearing a password the client knows about is a change.
+        assert!(password_differs("", &known, true));
+        // Significant spaces are part of the value, not noise.
+        assert!(password_differs(" meeting42", &known, true));
+    }
+
+    /// The two transitions the report called out, as a state machine.
+    #[test]
+    fn stale_baseline_never_blocks_a_real_reapply() {
+        // 1. Type a password, lock (the toggle stores it and adopts it).
+        let mut known = normalize_password("meeting42");
+        assert_eq!(known, Some("meeting42".to_string()));
+        // 2. Clear the field: the server still admits with meeting42, so
+        //    clearing must be applicable.
+        assert!(password_differs("", &known, true));
+        // 3. Apply the removal.
+        known = normalize_password("");
+        assert_eq!(known, None);
+        assert!(!password_differs("", &known, false));
+
+        // 4. Apply meeting42 to a locked room, then unlock: the server drops
+        //    the password, so the baseline must go with it.
+        known = normalize_password("meeting42");
+        assert_eq!(known, Some("meeting42".to_string()));
+        known = None; // the Effect clears it on unlock
+        // 5. Relock without a password, then type meeting42 again. The server
+        //    now has no password, so this is a real change and must apply.
+        assert!(password_differs("meeting42", &known, false));
     }
 }

@@ -285,4 +285,186 @@ test.describe('Setting a password after locking (Step 5)', () => {
             await hostCtx.close();
         }
     });
+
+    test('a password stored by the toggle can be cleared from the field', async ({
+        browser,
+        request,
+    }) => {
+        const roomResp = await request.post('http://localhost:3000/api/rooms', {
+            data: {
+                room_name: 'ClearTogglePwd',
+                is_locked: false,
+                is_recording: false,
+                is_lobby_enabled: false,
+                max_participants: 10,
+            },
+        });
+        const roomName = (await roomResp.json()).config.room_name;
+        const roomUrl = `/room/${encodeURIComponent(roomName)}`;
+
+        const hostCtx = await browser.newContext();
+        const guestCtx = await browser.newContext();
+        try {
+            const hostPage = await hostCtx.newPage();
+            await hostPage.goto(roomUrl);
+            await hostPage.fill('.prejoin-container input[type="text"]', 'Host');
+            await hostPage.click('button.join-btn');
+            await expect(hostPage.locator('.room-container')).toBeVisible();
+
+            // Lock with a password through the toggle, then clear the field.
+            await hostPage.click('#settings-btn');
+            await hostPage.click('button:has-text("Moderator")');
+            await hostPage.fill('#lock-password-input', 'meeting42');
+            await hostPage.click('#lock-room-toggle');
+            await expect(hostPage.locator('#apply-password-btn')).toBeDisabled();
+
+            await hostPage.fill('#lock-password-input', '');
+            // Regression: the baseline was adopted from the toggle, so an empty
+            // draft compared equal to nothing and Apply stayed dead while the
+            // server still admitted guests with meeting42.
+            await expect(hostPage.locator('#apply-password-btn')).toBeEnabled();
+            await hostPage.click('#apply-password-btn');
+            await hostPage.click('#close-settings-btn');
+
+            // The password is gone, so the room is now hard-locked.
+            const guestPage = await guestCtx.newPage();
+            await guestPage.goto(roomUrl);
+            await guestPage.fill('.prejoin-container input[type="text"]', 'Guest');
+            await guestPage.click('button.join-btn');
+            await expect(guestPage.locator('.toast-container .toast-error'))
+                .toHaveText('Room is locked', { timeout: 10000 });
+            await expect(guestPage.locator('#room-password')).toHaveCount(0);
+        } finally {
+            await hostCtx.close();
+            await guestCtx.close();
+        }
+    });
+
+    test('a password can be reapplied after unlocking and relocking', async ({
+        browser,
+        request,
+    }) => {
+        const roomResp = await request.post('http://localhost:3000/api/rooms', {
+            data: {
+                room_name: 'RelockPwd',
+                is_locked: false,
+                is_recording: false,
+                is_lobby_enabled: false,
+                max_participants: 10,
+            },
+        });
+        const roomName = (await roomResp.json()).config.room_name;
+        const roomUrl = `/room/${encodeURIComponent(roomName)}`;
+
+        const hostCtx = await browser.newContext();
+        const guestCtx = await browser.newContext();
+        try {
+            const hostPage = await hostCtx.newPage();
+            await hostPage.goto(roomUrl);
+            await hostPage.fill('.prejoin-container input[type="text"]', 'Host');
+            await hostPage.click('button.join-btn');
+            await expect(hostPage.locator('.room-container')).toBeVisible();
+
+            await hostPage.click('#settings-btn');
+            await hostPage.click('button:has-text("Moderator")');
+            await hostPage.fill('#lock-password-input', 'meeting42');
+            await hostPage.click('#lock-room-toggle');
+            // The toggle stored the draft, so the client must adopt it as the
+            // baseline: nothing is unsaved, and Apply is disabled. Without the
+            // adoption the same text looks like a pending change.
+            await expect(hostPage.locator('.settings-hint').filter({
+                hasText: 'Guests need this password to join',
+            })).toBeVisible({ timeout: 10000 });
+            await expect(hostPage.locator('#password-unsaved')).toBeHidden();
+            await expect(hostPage.locator('#apply-password-btn')).toBeDisabled();
+
+            // Unlock: the server drops the password, so the baseline must too.
+            await hostPage.click('#lock-room-toggle');
+            // Wait for the round-trip: a re-render would otherwise overwrite the
+            // field between clearing it and the next toggle click.
+            await expect(hostPage.locator('.settings-hint').filter({
+                hasText: 'Set a password before locking',
+            })).toBeVisible({ timeout: 10000 });
+
+            await hostPage.fill('#lock-password-input', '');
+            // The toggle carries whatever is in the field, so the clear must
+            // have landed before the click or the relock silently re-stores the
+            // old password.
+            await expect(hostPage.locator('#lock-password-input')).toHaveValue('');
+            await hostPage.click('#lock-room-toggle');
+            // Relocked without a password.
+            await expect(hostPage.locator('.settings-hint').filter({
+                hasText: 'locked without a password',
+            })).toBeVisible({ timeout: 10000 });
+            await expect(hostPage.locator('#apply-password-btn')).toBeDisabled();
+
+            // Regression: a stale baseline made this look already-saved, so
+            // Apply stayed disabled while the room rejected every join.
+            await hostPage.fill('#lock-password-input', 'meeting42');
+            await expect(hostPage.locator('#apply-password-btn')).toBeEnabled();
+            await hostPage.click('#apply-password-btn');
+            await hostPage.click('#close-settings-btn');
+
+            const guestPage = await guestCtx.newPage();
+            await guestPage.goto(roomUrl);
+            await guestPage.fill('.prejoin-container input[type="text"]', 'Guest');
+            await guestPage.click('button.join-btn');
+            await expect(guestPage.locator('#room-password')).toBeVisible({ timeout: 10000 });
+            await guestPage.fill('#room-password', 'meeting42');
+            await guestPage.click('button.join-btn');
+            await expect(guestPage.locator('.room-container')).toBeVisible({ timeout: 10000 });
+        } finally {
+            await hostCtx.close();
+            await guestCtx.close();
+        }
+    });
+
+    test('a password with significant spaces is stored exactly as typed', async ({
+        browser,
+        request,
+    }) => {
+        const roomResp = await request.post('http://localhost:3000/api/rooms', {
+            data: {
+                room_name: 'SpacedPwd',
+                is_locked: false,
+                is_recording: false,
+                is_lobby_enabled: false,
+                max_participants: 10,
+            },
+        });
+        const roomName = (await roomResp.json()).config.room_name;
+        const roomUrl = `/room/${encodeURIComponent(roomName)}`;
+
+        const hostCtx = await browser.newContext();
+        const guestCtx = await browser.newContext();
+        try {
+            const hostPage = await hostCtx.newPage();
+            await hostPage.goto(roomUrl);
+            await hostPage.fill('.prejoin-container input[type="text"]', 'Host');
+            await hostPage.click('button.join-btn');
+            await expect(hostPage.locator('.room-container')).toBeVisible();
+
+            // Lock first, then apply a password whose spaces are part of it.
+            await hostPage.click('#settings-btn');
+            await hostPage.click('button:has-text("Moderator")');
+            await hostPage.click('#lock-room-toggle');
+            await hostPage.fill('#lock-password-input', ' planning42 ');
+            await hostPage.click('#apply-password-btn');
+            await hostPage.click('#close-settings-btn');
+
+            // Regression: Apply trimmed the value, so the shared password with
+            // its spaces was rejected as invalid.
+            const guestPage = await guestCtx.newPage();
+            await guestPage.goto(roomUrl);
+            await guestPage.fill('.prejoin-container input[type="text"]', 'Guest');
+            await guestPage.click('button.join-btn');
+            await expect(guestPage.locator('#room-password')).toBeVisible({ timeout: 10000 });
+            await guestPage.fill('#room-password', ' planning42 ');
+            await guestPage.click('button.join-btn');
+            await expect(guestPage.locator('.room-container')).toBeVisible({ timeout: 10000 });
+        } finally {
+            await hostCtx.close();
+            await guestCtx.close();
+        }
+    });
 });

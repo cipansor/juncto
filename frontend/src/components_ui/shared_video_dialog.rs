@@ -38,7 +38,7 @@ pub fn SharedVideoDialog(
                         />
                         <Show when=move || invalid.get()>
                             <p id="shared-video-error" class="form-error">
-                                "Enter a valid YouTube link, e.g. https://www.youtube.com/watch?v=ID"
+                                "Enter a valid YouTube link, e.g. https://www.youtube.com/watch?v=dQw4w9WgXcQ"
                             </p>
                         </Show>
                     </div>

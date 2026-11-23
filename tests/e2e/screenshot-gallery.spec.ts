@@ -99,10 +99,15 @@ test.describe('UI screenshot gallery', () => {
         for (const [tab, shot] of [
             ['Devices', '07-settings-devices'],
             ['Integrations', '08-settings-integrations'],
+            ['Moderator', '35-settings-moderator'],
             ['More', '09-settings-more'],
             ['Branding', '10-settings-branding'],
         ] as const) {
-            await page.locator(`.modal-content .tabs button:has-text("${tab}")`).click();
+            const tabButton = page.locator(`.modal-content .tabs button:has-text("${tab}")`);
+            await tabButton.click();
+            // The click only marks the tab active once its panel has rendered;
+            // without this wait a capture could be filed under the wrong name.
+            await expect(tabButton).toHaveClass(/active/);
             await page.waitForTimeout(600);
             await page.screenshot({ path: `${OUT}/${shot}.png` });
         }

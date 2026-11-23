@@ -80,9 +80,13 @@ for how the gallery and the contrast audit work.
 |---|---|---|
 | ![Settings profile](./tests/screenshots/06-settings-profile.png) | ![Settings devices](./tests/screenshots/07-settings-devices.png) | ![Settings integrations](./tests/screenshots/08-settings-integrations.png) |
 
-| More | Branding | Virtual background |
+| Moderator | More | Branding |
 |---|---|---|
-| ![Settings more](./tests/screenshots/09-settings-more.png) | ![Settings branding](./tests/screenshots/10-settings-branding.png) | ![Virtual background](./tests/screenshots/15-virtual-background.png) |
+| ![Settings moderator](./tests/screenshots/35-settings-moderator.png) | ![Settings more](./tests/screenshots/09-settings-more.png) | ![Settings branding](./tests/screenshots/10-settings-branding.png) |
+
+| Virtual background |
+|---|
+| ![Virtual background](./tests/screenshots/15-virtual-background.png) |
 
 ### Collaboration and dialogs
 
