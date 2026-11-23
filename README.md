@@ -66,6 +66,10 @@ for how the gallery and the contrast audit work.
 |---|---|---|
 | ![Notifications](./tests/screenshots/13-notifications.png) | ![Speaker stats](./tests/screenshots/17-speaker-stats.png) | ![Whiteboard](./tests/screenshots/14-whiteboard.png) |
 
+| A long room name |
+|---|
+| ![A long room name in the header](./tests/screenshots/43-room-long-name.png) |
+
 | Breakout rooms | Reactions | Subtitles |
 |---|---|---|
 | ![Breakout rooms](./tests/screenshots/31-breakout-rooms.png) | ![Reactions](./tests/screenshots/28-reactions.png) | ![Subtitles](./tests/screenshots/29-subtitles.png) |

@@ -49,7 +49,7 @@ const REQUIRED_SHOTS = [
     '31-breakout-rooms', '32-remote-control', '33-room-chat-open',
     '34-visitor-mode', '35-lobby', '36-rejoin-overlay', '37-mobile-home',
     '38-mobile-prejoin', '39-mobile-room', '40-mobile-chat',
-    '41-mobile-settings', '42-settings-moderator',
+    '41-mobile-settings', '42-settings-moderator', '43-room-long-name',
 ] as const;
 
 function expectEveryViewCaptured(captured: string[]) {
@@ -512,6 +512,23 @@ test.describe('UI screenshot gallery', () => {
         } else {
             test.info().annotations.push({ type: 'skip', description: 'mobile settings not opened' });
         }
+    });
+
+    test('capture the header with a long room name', async ({ page, request }) => {
+        // The header is one flex row, and a long room name used to push the
+        // badges past its right edge onto the page behind them. The title now
+        // truncates, so the bar stays intact whatever the name length.
+        fs.mkdirSync(OUT_DIR, { recursive: true });
+        await resetRoom(request);
+        await page.setViewportSize(DESKTOP);
+        const long = 'VeryLongRoomName_'.repeat(4) + Date.now();
+        await page.goto(`/room/${long}`);
+        await page.waitForSelector('#display-name');
+        await page.fill('#display-name', 'GalleryLongName');
+        await page.click('.join-btn');
+        await expect(page.locator('.room-container')).toBeVisible({ timeout: 20000 });
+        await page.waitForTimeout(1500);
+        await capture(page, '43-room-long-name', captured, OUT);
     });
 
     test.afterAll(() => {
