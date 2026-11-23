@@ -184,9 +184,9 @@ body {
        the bell: the 🔔 renders as a colour emoji on CI, and the badge's green
        text was sampled against the bell's gold at 1.10:1.
        96px is 12px offset + a bell up to 84px wide. The bell's width follows
-       the emoji font, and CI's fallback is far wider than a local one — a 72px
-       reserve left 4px of the badge covered there. The audit scales the bell to
-       44px to reproduce that, so this margin is exercised on every run. */
+       the emoji font, and CI's fallback is far wider than a local one, so the
+       audit gives the bell that 84px budget rather than trusting whichever
+       font the machine has. */
     padding: 12px 96px 12px 24px;
     background: var(--bg-glass);
     backdrop-filter: var(--glass-backdrop);
@@ -1760,8 +1760,8 @@ p.form-error, .form-error {
         /* The bell still floats over this bar's top-right corner on mobile, so
            the reserve is kept here too: this rule overrides the desktop padding
            wholesale, and without it the bell covered 30px of the lock badge at
-           768px. 64px is the 12px offset plus a bell up to 52px wide, which
-           covers CI's wider emoji font at the 16px the bell renders at here. */
+           768px. 64px is the 12px offset plus a bell up to 52px wide, and the
+           audit gives the bell that budget here too. */
         padding: 8px 64px 8px 12px;
         height: 56px;
     }

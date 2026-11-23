@@ -215,9 +215,12 @@ test.describe('Dialog contrast audit', () => {
         // text was then sampled against the bell's gold pixels and the audit
         // reported 1.10:1 for text that is legible.
         //
-        // The bell is scaled up rather than relying on the CI font, so the
-        // overlap is reproduced wherever the test runs. The header reserves the
-        // corner (`padding-right`), so a wider bell still clears the badge.
+        // The bell's width follows the colour-emoji font, and CI's fallback is
+        // roughly twice as wide as a local one, so measuring whatever font this
+        // machine has proves nothing about CI. The reserve is written down as a
+        // budget instead — 12px offset plus a bell up to 84px — and the bell is
+        // given exactly that width here. A font-independent check of the
+        // invariant, not of the font.
         await resetRoom(request);
         await page.setViewportSize(DESKTOP);
         await page.goto(`/room/Bell_${Date.now()}`);
@@ -226,7 +229,9 @@ test.describe('Dialog contrast audit', () => {
         await page.click('.join-btn');
         await expect(page.locator('.room-container')).toBeVisible({ timeout: 20000 });
         await page.waitForTimeout(1500);
-        await page.addStyleTag({ content: '#notif-bell-btn { font-size: 44px !important; }' });
+        await page.addStyleTag({
+            content: '#notif-bell-btn { width: 84px !important; box-sizing: border-box; }',
+        });
         await page.waitForTimeout(300);
 
         const overlap = await page.evaluate(() => {
@@ -259,11 +264,13 @@ test.describe('Dialog contrast audit', () => {
             await expect(page.locator('.room-container')).toBeVisible({ timeout: 20000 });
             await page.waitForTimeout(1200);
 
-            // Scale the bell to the width CI's colour-emoji font produces.
-            // Without this the test measures whatever emoji font this machine
-            // has, and passes locally while CI fails: the desktop case was
-            // red for 4px on CI with the same reserve.
-            await page.addStyleTag({ content: '#notif-bell-btn { font-size: 44px !important; }' });
+            // The mobile reserve is 12px offset plus a bell up to 52px. Give
+            // the bell that width rather than a font size: a font size scales
+            // CI's wider fallback emoji further still, which is what made this
+            // test red on CI for a page whose shipped bell clears the badge.
+            await page.addStyleTag({
+                content: '#notif-bell-btn { width: 52px !important; box-sizing: border-box; }',
+            });
             await page.waitForTimeout(300);
 
             const clearance = await page.evaluate(() => {
