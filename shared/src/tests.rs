@@ -495,3 +495,93 @@ fn test_is_same_chat_distinguishes_attachment_only_messages() {
     assert!(!is_same_chat(&a, &b));
     assert!(is_same_chat(&a, &a.clone()));
 }
+
+#[test]
+fn youtube_ids_are_extracted_from_every_supported_url_shape() {
+    use crate::youtube_video_id;
+
+    let id = "abcdefghijk";
+    for url in [
+        format!("https://www.youtube.com/watch?v={id}"),
+        format!("https://www.youtube.com/watch?v={id}&t=42s"),
+        format!("https://m.youtube.com/watch?v={id}"),
+        format!("https://youtu.be/{id}"),
+        format!("https://youtu.be/{id}?si=share-token"),
+        format!("https://www.youtube.com/embed/{id}"),
+        format!("https://www.youtube.com/shorts/{id}"),
+        format!("https://www.youtube.com/live/{id}"),
+        format!("https://www.youtube.com/live/{id}?si=share-token"),
+        format!("  https://www.youtube.com/watch?v={id}  "),
+    ] {
+        assert_eq!(
+            youtube_video_id(&url).as_deref(),
+            Some(id),
+            "expected id from {url:?}"
+        );
+    }
+}
+
+#[test]
+fn livestream_share_links_keep_working() {
+    // Regression: `/live/<id>` is what YouTube's Share button produces for a
+    // stream. Rejecting it silently dropped a link the old player could embed.
+    let id = crate::youtube_video_id("https://www.youtube.com/live/abcdefghijk?si=token")
+        .expect("livestream share link should be accepted");
+    assert_eq!(id, "abcdefghijk");
+    assert_eq!(
+        format!("https://www.youtube.com/embed/{id}?autoplay=1"),
+        "https://www.youtube.com/embed/abcdefghijk?autoplay=1"
+    );
+}
+
+#[test]
+fn truncated_video_ids_are_rejected() {
+    use crate::youtube_video_id;
+
+    // Regression: these are nonempty and URL-safe, so a length-agnostic check
+    // accepted them and broadcast an unplayable tile.
+    for url in [
+        "https://www.youtube.com/watch?v=ID", // the placeholder text itself
+        "https://www.youtube.com/watch?v=abc", // truncated
+        "https://www.youtube.com/watch?v=abcdefghij", // one short
+        "https://www.youtube.com/watch?v=abcdefghijkl", // one long
+        "https://youtu.be/abc",
+        "https://www.youtube.com/live/abcdefghij",
+        "https://www.youtube.com/shorts/abcdefghijkl",
+    ] {
+        assert_eq!(youtube_video_id(url), None, "expected reject for {url:?}");
+    }
+}
+
+#[test]
+fn non_youtube_and_malformed_urls_are_rejected() {
+    use crate::youtube_video_id;
+
+    for url in [
+        "https://vimeo.com/123456789",
+        "https://www.youtube.com/",
+        "https://www.youtube.com/watch",
+        "https://www.youtube.com/channel/abcdefghijk",
+        "ftp://www.youtube.com/watch?v=abcdefghijk",
+        "javascript:alert(1)//youtube.com/watch?v=abcdefghijk",
+        "https://evil.com/youtube.com/watch?v=abcdefghijk",
+        "not a url",
+        "",
+    ] {
+        assert_eq!(youtube_video_id(url), None, "expected reject for {url:?}");
+    }
+}
+
+#[test]
+fn youtube_ids_reject_non_url_safe_characters() {
+    use crate::youtube_video_id;
+
+    assert_eq!(
+        youtube_video_id("https://www.youtube.com/watch?v=abcdefghij!"),
+        None
+    );
+    assert_eq!(
+        youtube_video_id("https://www.youtube.com/watch?v=abcdefghij "),
+        None
+    );
+}

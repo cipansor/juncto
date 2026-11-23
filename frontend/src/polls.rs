@@ -299,7 +299,7 @@ pub fn PollsDialog(
                                     />
                                 </div>
                                 <Show when=move || form_error.get().is_some()>
-                                    <p id="poll-form-error" style="color: #dc3545; font-size: 0.85rem; margin-bottom: 10px;">
+                                    <p id="poll-form-error" class="form-error">
                                         {move || form_error.get().unwrap_or_default()}
                                     </p>
                                 </Show>

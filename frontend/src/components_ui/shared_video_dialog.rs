@@ -1,44 +1,9 @@
 use crate::i18n::t;
 use leptos::prelude::*;
 
-/// Extracts the YouTube video id from the URL shapes the embed supports.
-/// Returns `None` for anything that is not a YouTube link with an id, so the
-/// dialog can refuse to broadcast a video that would render as a blank tile.
+/// Thin re-export so the grid and dialog cannot drift from the server.
 pub(crate) fn youtube_video_id(url: &str) -> Option<String> {
-    let trimmed = url.trim();
-    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
-        return None;
-    }
-    let (host, rest) = trimmed
-        .split_once("://")?
-        .1
-        .split_once('/')
-        .unwrap_or((trimmed.split_once("://")?.1, ""));
-    let host = host.trim_start_matches("www.");
-    let is_youtube = matches!(
-        host,
-        "youtube.com" | "m.youtube.com" | "youtu.be" | "youtube-nocookie.com"
-    );
-    if !is_youtube {
-        return None;
-    }
-    let id = if host == "youtu.be" {
-        rest.split(['?', '#']).next().unwrap_or("")
-    } else if let Some(after) = rest.split_once("v=").map(|(_, a)| a) {
-        after.split(['&', '#']).next().unwrap_or("")
-    } else if let Some(after) = rest.strip_prefix("embed/") {
-        after.split(['?', '#']).next().unwrap_or("")
-    } else if let Some(after) = rest.strip_prefix("shorts/") {
-        after.split(['?', '#']).next().unwrap_or("")
-    } else {
-        ""
-    };
-    let valid = !id.is_empty()
-        && id.len() <= 32
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    valid.then(|| id.to_string())
+    shared::youtube_video_id(url)
 }
 
 #[component]
@@ -72,7 +37,7 @@ pub fn SharedVideoDialog(
                             style="width: 100%;"
                         />
                         <Show when=move || invalid.get()>
-                            <p id="shared-video-error" style="color: #dc3545; font-size: 0.85rem; margin-top: 6px;">
+                            <p id="shared-video-error" class="form-error">
                                 "Enter a valid YouTube link, e.g. https://www.youtube.com/watch?v=ID"
                             </p>
                         </Show>

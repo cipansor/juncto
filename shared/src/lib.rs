@@ -642,6 +642,64 @@ pub fn is_valid_css_hex_color(value: &str) -> bool {
     matches!(hex.len(), 3 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Extracts the video id from a YouTube URL the embed player can render.
+///
+/// Shared by the dialog that validates the link, the grid that renders the
+/// embed, and the server that relays it, so an accepted URL always plays and a
+/// rejected one is never broadcast. Returns `None` for non-YouTube links and
+/// for anything without a well-formed id.
+///
+/// Recognised shapes:
+/// - `youtu.be/<id>`
+/// - `youtube.com/watch?v=<id>` (also `m.youtube.com`)
+/// - `youtube.com/embed/<id>`
+/// - `youtube.com/shorts/<id>`
+/// - `youtube.com/live/<id>` — what the "Share" button produces for a stream
+pub fn youtube_video_id(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let (scheme, after_scheme) = trimmed.split_once("://")?;
+    if !matches!(scheme, "https" | "http") {
+        return None;
+    }
+    // The authority ends at the first `/`, `?` or `#`; using only `/` would
+    // misread `youtube.com?v=...` and let a crafted authority through.
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let (host, rest) = after_scheme.split_at(authority_end);
+    let host = host.trim_start_matches("www.").to_ascii_lowercase();
+    let rest = rest.strip_prefix('/').unwrap_or(rest);
+    let is_youtube = matches!(
+        host.as_str(),
+        "youtube.com" | "m.youtube.com" | "youtu.be" | "youtube-nocookie.com"
+    );
+    if !is_youtube {
+        return None;
+    }
+    let id = if host == "youtu.be" {
+        rest.split(['?', '#']).next().unwrap_or("")
+    } else if let Some((_, after)) = rest.split_once("v=") {
+        after.split(['&', '#']).next().unwrap_or("")
+    } else {
+        ["embed/", "shorts/", "live/"]
+            .iter()
+            .find_map(|prefix| rest.strip_prefix(prefix))
+            .map(|after| after.split(['?', '#', '/']).next().unwrap_or(""))
+            .unwrap_or("")
+    };
+    is_youtube_video_id(id).then(|| id.to_string())
+}
+
+/// A YouTube video id is exactly 11 characters from the URL-safe base64
+/// alphabet. Length matters: a truncated id (or the literal `ID` from the
+/// placeholder) is nonempty and URL-safe but cannot identify a video.
+pub fn is_youtube_video_id(id: &str) -> bool {
+    id.len() == 11
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// Returns `true` if `url` is an acceptable branding logo URL: an absolute
 /// `https://` URL of at most 2048 characters.
 ///

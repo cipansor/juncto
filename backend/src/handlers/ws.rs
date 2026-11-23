@@ -2501,41 +2501,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     }
 }
-/// Whether the shared-video embed can render this URL. Mirrors
-/// `frontend::components_ui::shared_video_dialog::youtube_video_id`; the server
-/// keeps its own copy so a client cannot broadcast an unrenderable tile.
+/// Whether the shared-video embed can render this URL. Delegates to the same
+/// parser the dialog and the grid use, so the three cannot disagree about what
+/// is broadcastable.
 fn is_supported_share_video_url(url: &str) -> bool {
-    let trimmed = url.trim();
-    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
-        return false;
-    }
-    let Some((_, after_scheme)) = trimmed.split_once("://") else {
-        return false;
-    };
-    let (host, rest) = after_scheme.split_once('/').unwrap_or((after_scheme, ""));
-    let host = host.trim_start_matches("www.");
-    if !matches!(
-        host,
-        "youtube.com" | "m.youtube.com" | "youtu.be" | "youtube-nocookie.com"
-    ) {
-        return false;
-    }
-    let id = if host == "youtu.be" {
-        rest.split(['?', '#']).next().unwrap_or("")
-    } else if let Some((_, after)) = rest.split_once("v=") {
-        after.split(['&', '#']).next().unwrap_or("")
-    } else if let Some(after) = rest.strip_prefix("embed/") {
-        after.split(['?', '#']).next().unwrap_or("")
-    } else if let Some(after) = rest.strip_prefix("shorts/") {
-        after.split(['?', '#']).next().unwrap_or("")
-    } else {
-        ""
-    };
-    !id.is_empty()
-        && id.len() <= 32
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    shared::youtube_video_id(url).is_some()
 }
 
 #[cfg(test)]
@@ -2806,6 +2776,7 @@ mod tests {
             "https://youtu.be/dQw4w9WgXcQ",
             "https://www.youtube.com/embed/dQw4w9WgXcQ",
             "https://m.youtube.com/watch?v=dQw4w9WgXcQ&t=10s",
+            "https://www.youtube.com/live/dQw4w9WgXcQ?si=stream",
         ] {
             assert!(
                 is_supported_share_video_url(good),
@@ -2820,6 +2791,9 @@ mod tests {
             "https://example.com/watch?v=dQw4w9WgXcQ",
             "https://www.youtube.com/watch",
             "https://youtu.be/",
+            // A truncated or placeholder id is URL-safe but not a video.
+            "https://www.youtube.com/watch?v=ID",
+            "https://www.youtube.com/live/abc",
         ] {
             assert!(
                 !is_supported_share_video_url(bad),

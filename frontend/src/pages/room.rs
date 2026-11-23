@@ -549,6 +549,10 @@ pub fn Room() -> impl IntoView {
                             current_noise_suppression=state.is_noise_suppression_enabled
                             is_host=state.is_host
                             is_locked=state.is_locked
+                            has_password=Signal::derive({
+                                let state = state.clone();
+                                move || state.room_config.get().has_password
+                            })
                             is_e2ee_enabled=state.is_e2ee_enabled
                             is_audio_moderation_enabled=Signal::derive({
                                 let state = state.clone();

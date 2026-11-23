@@ -26,6 +26,10 @@ pub fn SettingsDialog(
     #[prop(optional)] current_noise_suppression: Option<ReadSignal<bool>>,
     #[prop(optional)] is_host: Option<Signal<bool>>,
     #[prop(optional)] is_locked: Option<ReadSignal<bool>>,
+    /// Server-reported state: a password exists even though the client never
+    /// sees its value, so the hint must not claim the room has none.
+    #[prop(optional)]
+    has_password: Option<Signal<bool>>,
     #[prop(optional)] is_e2ee_enabled: Option<ReadSignal<bool>>,
     #[prop(optional)] is_audio_moderation_enabled: Option<Signal<bool>>,
     #[prop(optional)] is_video_moderation_enabled: Option<Signal<bool>>,
@@ -51,12 +55,18 @@ pub fn SettingsDialog(
 
     // Every other modal in the app closes on Escape; this one did not, which
     // leaves keyboard users with no way out except the mouse.
+    //
+    // `WindowListenerHandle` is not detached on drop, so the listener would
+    // outlive this component. `show` and `on_close` are owned by the room page,
+    // and the room page's signals are disposed when client-side navigation
+    // leaves it; the stale listener would then panic on `get_untracked()`.
     let show_for_esc = show;
-    window_event_listener(ev::keydown, move |ev| {
+    let escape_listener = window_event_listener(ev::keydown, move |ev| {
         if ev.key() == "Escape" && show_for_esc.get_untracked() {
             on_close.run(());
         }
     });
+    on_cleanup(move || escape_listener.remove());
 
     Effect::new(move |_| {
         if active_tab.get() == "moderator" && !is_host.map(|h| h.get()).unwrap_or(false) {
@@ -106,6 +116,37 @@ pub fn SettingsDialog(
     let (selected_audio, set_selected_audio) = signal(init_audio);
     let (video_quality, set_video_quality) = signal(init_res);
     let (lock_password, set_lock_password) = signal(String::new());
+    // The password the server is known to hold. Kept apart from the input text
+    // so a draft that was never applied cannot look saved.
+    let (saved_password, set_saved_password) = signal(String::new());
+    // Pushing the password to the server is an explicit action rather than a
+    // side effect of blur. Closing the dialog (Escape, the ×, or clicking the
+    // overlay) removes the focused input, and Firefox does not fire `change`
+    // for a removed element — so a typed password was silently discarded and
+    // every guest stayed locked out.
+    //
+    // Only meaningful while locked: the server ignores a password on an
+    // unlocked room, and the lock toggle carries the draft with it.
+    let apply_password = move || {
+        let Some(cb) = on_set_room_password else {
+            return;
+        };
+        if !is_locked.map(|l| l.get_untracked()).unwrap_or(false) {
+            return;
+        }
+        let pw = lock_password.get_untracked().trim().to_string();
+        if pw == saved_password.get_untracked() {
+            return;
+        }
+        cb.run(if pw.is_empty() {
+            None
+        } else {
+            Some(pw.clone())
+        });
+        set_saved_password.set(pw.clone());
+        set_lock_password.set(pw);
+    };
+
     let (noise_suppression, set_noise_suppression) = signal(
         current_noise_suppression
             .map(|s| s.get_untracked())
@@ -641,22 +682,50 @@ pub fn SettingsDialog(
                                     id="lock-password-input"
                                     placeholder="Password (optional)"
                                     on:input=move |ev| set_lock_password.set(event_target_value(&ev))
-                                    on:change=move |_| {
-                                        // The lock toggle only fires on change, so a password
-                                        // typed after locking would never reach the server and
-                                        // every guest would be rejected for good.
-                                        if is_locked.map(|l| l.get()).unwrap_or(false)
-                                            && let Some(cb) = on_set_room_password
-                                        {
-                                            let pw = lock_password.get_untracked();
-                                            cb.run(if pw.trim().is_empty() { None } else { Some(pw) });
+                                    on:keydown=move |ev| {
+                                        if ev.key() == "Enter" {
+                                            ev.prevent_default();
+                                            apply_password();
                                         }
                                     }
                                     prop:value=move || lock_password.get()
                                     style="margin-top: 8px; width: 100%;"
                                 />
+                                <button
+                                    id="apply-password-btn"
+                                    class="btn btn-secondary"
+                                    prop:disabled=move || {
+                                        !is_locked.map(|l| l.get()).unwrap_or(false)
+                                            || lock_password.get().trim()
+                                                == saved_password.get().trim()
+                                    }
+                                    on:click=move |_| apply_password()
+                                >
+                                    "Apply Password"
+                                </button>
+                                <Show when=move || {
+                                    is_locked.map(|l| l.get()).unwrap_or(false)
+                                        && lock_password.get().trim()
+                                            != saved_password.get().trim()
+                                }>
+                                    <p id="password-unsaved" class="settings-hint" style="margin-top: 4px;">
+                                        "Press Apply Password to save this change."
+                                    </p>
+                                </Show>
                                 <p class="settings-hint" style="margin-top: 4px;">
-                                    "Set a password before locking to require it for new joins."
+                                    {move || {
+                                        if is_locked.map(|l| l.get()).unwrap_or(false) {
+                                            let known = !saved_password.get().is_empty()
+                                                || has_password.map(|h| h.get()).unwrap_or(false);
+                                            if known {
+                                                "Guests need this password to join. Clear it and press Apply to keep the room closed."
+                                            } else {
+                                                "The room is locked without a password, so nobody can join. Apply a password to let guests in."
+                                            }
+                                        } else {
+                                            "Set a password before locking to require it for new joins."
+                                        }
+                                    }}
                                 </p>
                             </div>
                             <div class="form-group" style="margin-bottom: 15px;">

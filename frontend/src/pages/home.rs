@@ -45,7 +45,7 @@ pub fn Home() -> impl IntoView {
                         placeholder="Enter meeting name..."
                     />
                     <Show when=move || name_error.get()>
-                        <p id="meeting-name-error" style="color: #dc3545; font-size: 0.85rem; margin-top: 6px;">
+                        <p id="meeting-name-error" class="form-error">
                             "Enter a room name to start a meeting."
                         </p>
                     </Show>

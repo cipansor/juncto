@@ -1397,6 +1397,15 @@ body {
     to { transform: rotate(360deg); }
 }
 
+/* Inline form validation message. Uses theme tokens so it stays legible when
+   the palette changes; do not reintroduce literal colours in markup. */
+.form-error {
+    color: var(--danger-color);
+    font-size: var(--font-size-xs);
+    margin-top: 6px;
+    margin-bottom: 10px;
+}
+
 /* Settings helpers */
 .settings-hint {
     color: var(--text-muted);

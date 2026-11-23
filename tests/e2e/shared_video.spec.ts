@@ -71,3 +71,72 @@ test.describe('Shared Video', () => {
         await contextB.close();
     });
 });
+
+test.describe('Shared Video validation', () => {
+    test.beforeEach(async ({ request }) => {
+        // One global room per server: clear lock/password left by earlier tests.
+        const resp = await request.post('/api/rooms', {
+            data: {
+                room_name: 'Reset Room',
+                is_locked: false,
+                is_recording: false,
+                is_lobby_enabled: false,
+                max_participants: 100,
+                host_id: null,
+                e2ee_enabled: false,
+            },
+        });
+        expect(resp.ok()).toBeTruthy();
+    });
+
+    const joinAsHost = async (page: import('@playwright/test').Page, room: string) => {
+        await page.goto('/');
+        await page.fill('#meeting-name', room);
+        await page.click('.create-btn');
+        await page.waitForSelector('#display-name');
+        await page.fill('#display-name', 'Alice');
+        await page.click('.join-btn');
+        await page.waitForSelector('.room-container');
+        await page.click('button:has-text("Video")');
+        await expect(page.locator('h3:has-text("Share Video")')).toBeVisible();
+    };
+
+    test('livestream share link is accepted and embedded', async ({ browser }) => {
+        const roomName = `LiveRoom_${Date.now()}`;
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        await joinAsHost(page, roomName);
+
+        // What YouTube's Share button produces for a stream.
+        await page
+            .locator('input[placeholder*="youtube.com"]')
+            .fill('https://www.youtube.com/live/abcdefghijk?si=share-token');
+        await page.locator('#submit-shared-video-btn').click();
+
+        await expect(page.locator('.shared-video')).toBeVisible();
+        await expect(page.locator('iframe[src*="abcdefghijk"]')).toBeVisible();
+        await context.close();
+    });
+
+    for (const [label, url] of [
+        ['placeholder ID', 'https://www.youtube.com/watch?v=ID'],
+        ['truncated ID', 'https://www.youtube.com/watch?v=abc'],
+        ['non-YouTube link', 'https://vimeo.com/123456789'],
+    ] as const) {
+        test(`rejects ${label} without closing the dialog`, async ({ browser }) => {
+            const roomName = `BadVideo_${Date.now()}`;
+            const context = await browser.newContext();
+            const page = await context.newPage();
+            await joinAsHost(page, roomName);
+
+            await page.locator('input[placeholder*="youtube.com"]').fill(url);
+            await page.locator('#submit-shared-video-btn').click();
+
+            // The error is shown and nothing was broadcast.
+            await expect(page.locator('#shared-video-error')).toBeVisible();
+            await expect(page.locator('h3:has-text("Share Video")')).toBeVisible();
+            await expect(page.locator('.shared-video')).toHaveCount(0);
+            await context.close();
+        });
+    }
+});
