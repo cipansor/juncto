@@ -222,6 +222,7 @@ function inkBySurface(
     rendered: Shot,
     painted: Shot,
     glyphs: Uint8Array,
+    coverage: Float32Array,
     rect: Rect,
 ): { surface: Rgb; ink: Rgb }[] {
     const { width, height } = rendered;
@@ -231,11 +232,30 @@ function inkBySurface(
     const x1 = Math.min(Math.floor(rect.x + rect.width), width - 1);
     if (x1 < x0 || y1 < y0) return [];
 
-    const groups = new Map<string, { surface: Rgb; samples: { distance: number; rgb: Rgb }[] }>();
+    // A pixel the glyph barely covers is mostly surface, so its colour is a
+    // blend and says nothing reliable about the ink. Scored on its own, such a
+    // sliver reports the surface as the ink — contrast 1.00 for text that is
+    // perfectly legible. The coverage floor is therefore relative to the best
+    // pixel on this line: opaque text peaks at 1.0 and translucent text at its
+    // own alpha, so an absolute floor would drop every pixel of faded text and
+    // report the line as having nothing to measure.
+    let peakCoverage = 0;
+    for (let y = y0; y <= y1; y += 1) {
+        for (let x = x0; x <= x1; x += 1) {
+            const i = y * width + x;
+            if (glyphs[i] === 1 && coverage[i] > peakCoverage) peakCoverage = coverage[i];
+        }
+    }
+    const minCoverage = peakCoverage * 0.5;
+    const groups = new Map<
+        string,
+        { surface: Rgb; samples: { distance: number; rgb: Rgb }[] }
+    >();
     for (let y = y0; y <= y1; y += 1) {
         for (let x = x0; x <= x1; x += 1) {
             const i = y * width + x;
             if (glyphs[i] !== 1) continue;
+            if (coverage[i] < minCoverage) continue;
             const ro = i * rendered.channels;
             const bo = i * painted.channels;
             const surface: Rgb = [
@@ -304,7 +324,13 @@ function inkBySurface(
 async function glyphLayers(
     page: Page,
     selector: string,
-): Promise<{ rendered: Shot; painted: Shot; glyphs: Uint8Array; runs: TextRun[] }> {
+): Promise<{
+    rendered: Shot;
+    painted: Shot;
+    glyphs: Uint8Array;
+    coverage: Float32Array;
+    runs: TextRun[];
+}> {
     const applyFill = async (fill: string | null, freezeOnly = false) => {
         const ok = await page.evaluate(
             ([sel, value, frozen]) => {
@@ -355,7 +381,13 @@ async function glyphLayers(
         // then move the text out from under the mask.
         const runs = await textRuns(page, selector);
         if (!(await applyFill('transparent'))) {
-            return { rendered, painted: rendered, glyphs: new Uint8Array(0), runs };
+            return {
+                rendered,
+                painted: rendered,
+                glyphs: new Uint8Array(0),
+                coverage: new Float32Array(0),
+                runs,
+            };
         }
         const painted = decodePng(await page.screenshot());
 
@@ -365,8 +397,22 @@ async function glyphLayers(
             probes.push(decodePng(await page.screenshot()));
         }
 
+
         const [a, b] = probes;
         const glyphs = new Uint8Array(a.width * a.height);
+        // How much of the pixel the glyph actually covers. The probe fills are
+        // deliberately opposite (`PROBE_FILLS`), so the delta between them
+        // scales with coverage: a fully covered pixel is all probe colour and
+        // moves the whole distance, an antialiased edge pixel moves only a
+        // fraction. Reading ink from edge pixels is what a per-surface score
+        // must not do — an edge is a blend of ink and surface, so a faint one
+        // reads as the surface itself (contrast 1.00) and a bold one reads as
+        // ink that is nowhere on screen.
+        const coverage = new Float32Array(a.width * a.height);
+        const maxDelta =
+            Math.abs(PROBE_FILLS[0][0] - PROBE_FILLS[1][0]) +
+            Math.abs(PROBE_FILLS[0][1] - PROBE_FILLS[1][1]) +
+            Math.abs(PROBE_FILLS[0][2] - PROBE_FILLS[1][2]);
         for (let i = 0; i < glyphs.length; i += 1) {
             const o = i * a.channels;
             const delta =
@@ -374,8 +420,9 @@ async function glyphLayers(
                 Math.abs(a.pixels[o + 1] - b.pixels[o + 1]) +
                 Math.abs(a.pixels[o + 2] - b.pixels[o + 2]);
             if (delta > GLYPH_DELTA) glyphs[i] = 1;
+            coverage[i] = Math.min(1, delta / maxDelta);
         }
-        return { rendered, painted, glyphs, runs };
+        return { rendered, painted, glyphs, coverage, runs };
     } finally {
         await applyFill(null);
     }
@@ -449,7 +496,7 @@ export async function expectReadableText(
     label: string,
     minRatio = AA_TEXT,
 ): Promise<number> {
-    const { rendered, painted, glyphs, runs } = await glyphLayers(page, selector);
+    const { rendered, painted, glyphs, coverage, runs } = await glyphLayers(page, selector);
     expect(runs.length, `no text inside ${label}`).toBeGreaterThan(0);
 
     let worst: { ratio: number; color: string; bg: Rgb } | null = null;
@@ -460,7 +507,7 @@ export async function expectReadableText(
             // Each surface under the letters is scored with the ink measured on
             // *that* surface. One ink per run is a false pass on a split: see
             // `inkBySurface`.
-            const pairs = inkBySurface(rendered, painted, glyphs, rect);
+            const pairs = inkBySurface(rendered, painted, glyphs, coverage, rect);
             if (pairs.length === 0) continue; // No visible glyphs here.
             measured += 1;
             // Every surface under the letters is scored, with no minimum share.
@@ -487,3 +534,4 @@ export async function expectReadableText(
     ).toBeGreaterThanOrEqual(minRatio);
     return worst!.ratio;
 }
+

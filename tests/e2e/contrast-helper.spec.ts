@@ -84,8 +84,11 @@ test.describe('contrast helper sampling', () => {
             <p id="t" style="margin:0;width:300px;font:20px/40px sans-serif;color:#ffffff;
                background:linear-gradient(to right,#000000 0 50%,#ffffff 50% 100%)">invisible words over a split</p>
         `);
+        // White on white is 1.00:1 in theory, but the assertion is that the
+        // line fails at all, not that the rasteriser blends to exactly zero.
+        // CI's font stack leaves a 1.02 fringe on the antialiased edges.
         await expect(expectReadableText(page, '#t', 'white on white', 3)).rejects.toThrow(
-            /contrast 1\.00 .* is below 3/,
+            /contrast 1\.0[0-9] .* is below 3/,
         );
     });
 
@@ -99,23 +102,33 @@ test.describe('contrast helper sampling', () => {
             <p id="t" style="margin:0;width:600px;font:20px/40px sans-serif;color:#ffffff;
                background:linear-gradient(to right,#000000 0 40%,#ffffff 40% 42%,#000000 42% 100%)">wide wide wide wide wide wide wide words here now</p>
         `);
+        // White on white is 1.00:1 in theory, but the assertion is that the
+        // line fails at all, not that the rasteriser blends to exactly zero.
+        // CI's font stack leaves a 1.02 fringe on the antialiased edges.
         await expect(expectReadableText(page, '#t', 'white on white', 3)).rejects.toThrow(
-            /contrast 1\.00 .* is below 3/,
+            /contrast 1\.0[0-9] .* is below 3/,
         );
     });
 
     test('translucent text across a split is scored per surface', async ({ page }) => {
-        // Half-opacity black over a white/black split. Measured as one ink for
-        // the whole run, the pixels average to rgb(128,128,128), which clears
-        // 3:1 against *both* halves — a false pass for letters that are pure
-        // black, and invisible, over the black half. The ink has to be read
-        // against the surface under each pixel.
+        // Half-opacity black over a white/black split. The letters over the black
+        // half are black on black: invisible.
+        //
+        // The wrapper carries the background, so the two surfaces stay opaque and
+        // only the ink is translucent. Painting the gradient on the text element
+        // with `opacity` fades the *surfaces* too — the "black" half becomes
+        // rgb(126,126,126) — and then the one-ink reading fails as well, on the
+        // white half. That fixture passes under either implementation and so
+        // proves nothing; this one separates them: scored as one ink for the whole
+        // run it reports 4.00:1 and passes, and per surface it reports 1.00:1 on
+        // the black half and fails, which is the truth.
         await page.setContent(`
-            <p id="t" style="margin:0;width:600px;font:20px/40px sans-serif;color:#000000;opacity:0.5;
-               background:linear-gradient(to right,#ffffff 0 50%,#000000 50% 100%)">translucent words over a split surface</p>
+            <div style="width:600px;background:linear-gradient(to right,#ffffff 0 50%,#000000 50% 100%)">
+              <p id="t" style="margin:0;font:20px/40px sans-serif;color:rgba(0,0,0,0.5)">translucent words over a split surface</p>
+            </div>
         `);
         await expect(expectReadableText(page, '#t', 'translucent split', 3)).rejects.toThrow(
-            /is below 3/,
+            /contrast 1\.0[0-9] .* is below 3/,
         );
     });
 

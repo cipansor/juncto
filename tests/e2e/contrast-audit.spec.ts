@@ -259,6 +259,13 @@ test.describe('Dialog contrast audit', () => {
             await expect(page.locator('.room-container')).toBeVisible({ timeout: 20000 });
             await page.waitForTimeout(1200);
 
+            // Scale the bell to the width CI's colour-emoji font produces.
+            // Without this the test measures whatever emoji font this machine
+            // has, and passes locally while CI fails: the desktop case was
+            // red for 4px on CI with the same reserve.
+            await page.addStyleTag({ content: '#notif-bell-btn { font-size: 44px !important; }' });
+            await page.waitForTimeout(300);
+
             const clearance = await page.evaluate(() => {
                 const badge = document.querySelector(
                     '.room-header .badge-success, .room-header .badge-danger',

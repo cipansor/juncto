@@ -178,12 +178,16 @@ body {
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    /* The notification bell is absolutely positioned over this bar's top-right
-       corner (`.capture-area` is its containing block), so the header yields
-       that corner to it. Without the reserve the last badge sat under the bell:
-       the 🔔 renders as a colour emoji on CI, and the badge's green text was
-       sampled against the bell's gold at 1.10:1. */
-    padding: 12px 72px 12px 24px;
+    /* The notification bell is absolutely positioned 12px from this bar's
+       right edge (`.capture-area` is its containing block), so the header
+       yields that corner to it. Without the reserve the last badge sat under
+       the bell: the 🔔 renders as a colour emoji on CI, and the badge's green
+       text was sampled against the bell's gold at 1.10:1.
+       96px is 12px offset + a bell up to 84px wide. The bell's width follows
+       the emoji font, and CI's fallback is far wider than a local one — a 72px
+       reserve left 4px of the badge covered there. The audit scales the bell to
+       44px to reproduce that, so this margin is exercised on every run. */
+    padding: 12px 96px 12px 24px;
     background: var(--bg-glass);
     backdrop-filter: var(--glass-backdrop);
     border-bottom: 1px solid var(--border-color);
@@ -1759,9 +1763,11 @@ p.form-error, .form-error {
 
     .room-header {
         /* The bell still floats over this bar's top-right corner on mobile, so
-           the reserve is kept here too: the desktop rule is overridden by this
-           one, and without it the bell covers the lock badge again. */
-        padding: 8px 56px 8px 12px;
+           the reserve is kept here too: this rule overrides the desktop padding
+           wholesale, and without it the bell covered 30px of the lock badge at
+           768px. 64px is the 12px offset plus a bell up to 52px wide, which
+           covers CI's wider emoji font at the 16px the bell renders at here. */
+        padding: 8px 64px 8px 12px;
         height: 56px;
     }
 
