@@ -83,7 +83,7 @@ function decodePng(buffer: Buffer): { width: number; height: number; pixels: Buf
     return { width, height, pixels, channels };
 }
 
-type Rect = { x: number; y: number; width: number; height: number };
+export type Rect = { x: number; y: number; width: number; height: number };
 
 type TextRun = { color: string; rects: Rect[] };
 
@@ -173,7 +173,7 @@ export async function paintedBackdrops(page: Page, selector: string): Promise<Rg
         .filter((rgb): rgb is Rgb => rgb !== null);
 }
 
-type Shot = { width: number; height: number; pixels: Buffer; channels: number };
+export type Shot = { width: number; height: number; pixels: Buffer; channels: number };
 
 /**
  * Per-channel difference above which a pixel changed between the two probe
@@ -218,7 +218,7 @@ const PROBE_FILLS: [Rgb, Rgb] = [
  * can only fail a line, never pass one — the opposite of the false pass this
  * replaces.
  */
-function inkBySurface(
+export function inkBySurface(
     rendered: Shot,
     painted: Shot,
     glyphs: Uint8Array,
@@ -251,32 +251,38 @@ function inkBySurface(
         string,
         { surface: Rgb; samples: { distance: number; rgb: Rgb }[] }
     >();
+    // Every surface a glyph touches, including those whose only glyph pixels are
+    // below the coverage floor. Dropping them would let the audit score only the
+    // backgrounds that happened to be measured well: over video each surface
+    // colour is nearly unique per pixel, so a bright patch that a letter only
+    // grazes would never be scored at all.
+    const touched = new Map<string, Rgb>();
     for (let y = y0; y <= y1; y += 1) {
         for (let x = x0; x <= x1; x += 1) {
             const i = y * width + x;
             if (glyphs[i] !== 1) continue;
-            if (coverage[i] < minCoverage) continue;
-            const ro = i * rendered.channels;
             const bo = i * painted.channels;
             const surface: Rgb = [
                 painted.pixels[bo],
                 painted.pixels[bo + 1],
                 painted.pixels[bo + 2],
             ];
+            const key = surface.join(',');
+            if (!touched.has(key)) touched.set(key, surface);
+            if (coverage[i] < minCoverage) continue;
+            const ro = i * rendered.channels;
             const rgb: Rgb = [rendered.pixels[ro], rendered.pixels[ro + 1], rendered.pixels[ro + 2]];
             const distance =
                 Math.abs(rgb[0] - surface[0]) +
                 Math.abs(rgb[1] - surface[1]) +
                 Math.abs(rgb[2] - surface[2]);
-            const key = surface.join(',');
             const group = groups.get(key);
             if (group) group.samples.push({ distance, rgb });
             else groups.set(key, { surface, samples: [{ distance, rgb }] });
         }
     }
 
-    const result: { surface: Rgb; ink: Rgb }[] = [];
-    for (const { surface, samples } of groups.values()) {
+    const inkOf = (samples: { distance: number; rgb: Rgb }[]): Rgb => {
         samples.sort((a, b) => b.distance - a.distance);
         const take = Math.max(1, Math.floor(samples.length / 10));
         const best = samples.slice(0, take);
@@ -284,14 +290,30 @@ function inkBySurface(
             (acc, s) => [acc[0] + s.rgb[0], acc[1] + s.rgb[1], acc[2] + s.rgb[2]],
             [0, 0, 0],
         );
-        result.push({
-            surface,
-            ink: [
-                Math.round(sum[0] / best.length),
-                Math.round(sum[1] / best.length),
-                Math.round(sum[2] / best.length),
-            ],
-        });
+        return [
+            Math.round(sum[0] / best.length),
+            Math.round(sum[1] / best.length),
+            Math.round(sum[2] / best.length),
+        ];
+    };
+
+    // The ink this line is drawn in, read from the surface that measured it best.
+    // A surface with no above-floor pixels of its own is scored against this: the
+    // letters are one colour, and it is the backdrop that changed under them.
+    let lineInk: Rgb | null = null;
+    let most = -1;
+    for (const { samples } of groups.values()) {
+        if (samples.length > most) {
+            most = samples.length;
+            lineInk = inkOf([...samples]);
+        }
+    }
+
+    const result: { surface: Rgb; ink: Rgb }[] = [];
+    for (const [key, surface] of touched) {
+        const group = groups.get(key);
+        const ink = group ? inkOf(group.samples) : lineInk;
+        if (ink) result.push({ surface, ink });
     }
     return result;
 }

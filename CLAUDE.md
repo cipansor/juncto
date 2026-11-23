@@ -91,6 +91,9 @@ All CSS lives in `backend/static/styles.css`, driven by the custom properties on
 those tokens rather than literal colours: hardcoded hex values are what produced the
 near-white-on-white dialog bugs, and the contrast audit will now fail the build for them.
 Responsive rules belong in the `@media` blocks at the bottom of the file (768 px, 480 px).
+A rule that has to react to a panel's width rather than the window's is a `@container`
+query instead — the room header is 440 px wide at a 780 px viewport with the chat panel
+open — and lives with those blocks, not in the element's own section.
 
 ## Testing expectations
 

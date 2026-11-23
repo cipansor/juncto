@@ -1,7 +1,7 @@
 import { test, expect, Page, APIRequestContext } from '@playwright/test';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { capture, loadCaptured } from './gallery-manifest';
 
 const OUT = process.env.SCREENSHOT_DIR || '../screenshots';
 const OUT_DIR = path.resolve(__dirname, OUT);
@@ -117,59 +117,7 @@ async function showPanel(page: Page, toggleId: string, panelSelector: string) {
     await expect(panel).toBeVisible({ timeout: 10000 });
 }
 
-/**
- * Capture one view and remember its name. Every capture goes through here so
- * the uniqueness check sees the declared name even when the write replaces an
- * earlier file, and so a silently skipped capture cannot pass unnoticed.
- */
-async function capture(
-    target: Page,
-    name: string,
-    captured: string[],
-    dir: string,
-) {
-    // `captured` is a set — the persisted manifest, so a retry does not re-add
-    // the views the first attempt wrote. The append-only list is what the
-    // duplicate-number check reads: deduping it would hide a spec that captured
-    // the same number twice.
-    written.push(name);
-    if (!captured.includes(name)) captured.push(name);
-    recordCaptured(captured);
-    await target.screenshot({ path: `${dir}/${name}.png` });
-    expect(
-        fs.existsSync(`${dir}/${name}.png`),
-        `capture ${name} did not write a file`,
-    ).toBe(true);
-}
-
-/**
- * The names captured so far, kept on disk as well as in memory.
- *
- * A retry runs in a fresh worker with a fresh module instance, so an in-memory
- * list is empty on the second attempt and `afterAll` then reports the first
- * attempt's views as missing — failing a run whose files are all present. The
- * manifest is scoped to the run id so a stale manifest from an earlier run
- * cannot vouch for a view this run never captured.
- */
 const written: string[] = [];
-
-const MANIFEST = path.join(
-    os.tmpdir(),
-    `juncto-gallery-${process.env.E2E_RUN_ID ?? 'local'}.json`,
-);
-
-function loadCaptured(): string[] {
-    try {
-        const raw = JSON.parse(fs.readFileSync(MANIFEST, 'utf8')) as unknown;
-        return Array.isArray(raw) ? raw.filter((n): n is string => typeof n === 'string') : [];
-    } catch {
-        return [];
-    }
-}
-
-function recordCaptured(names: string[]) {
-    fs.writeFileSync(MANIFEST, JSON.stringify(names));
-}
 
 test.describe('UI screenshot gallery', () => {
     const captured: string[] = loadCaptured();
@@ -184,14 +132,14 @@ test.describe('UI screenshot gallery', () => {
         await page.goto('/');
         await page.waitForSelector('#meeting-name');
         await page.waitForTimeout(500);
-        await capture(page, '01-home', captured, OUT);
+        await capture(page, '01-home', written, captured, OUT);
 
         // 2. Prejoin
         const room = `GalleryRoom_${Date.now()}`;
         await page.goto(`/room/${room}`);
         await page.waitForSelector('#display-name');
         await page.waitForTimeout(1000);
-        await capture(page, '02-prejoin', captured, OUT);
+        await capture(page, '02-prejoin', written, captured, OUT);
 
         // 3. Room with two participants and chat history
         await page.fill('#display-name', 'Alice');
@@ -209,23 +157,23 @@ test.describe('UI screenshot gallery', () => {
         await bob.fill('#chat-input', 'Leptos WASM + Axum dalam satu workspace.');
         await bob.keyboard.press('Enter');
         await page.waitForTimeout(1200);
-        await capture(page, '03-room', captured, OUT);
+        await capture(page, '03-room', written, captured, OUT);
 
         // 4. Participants panel
         await showPanel(page, '#toggle-participants-btn', '#participants-panel');
         await page.waitForTimeout(700);
-        await capture(page, '04-participants', captured, OUT);
+        await capture(page, '04-participants', written, captured, OUT);
 
         // 5. Chat panel
         await showPanel(page, '#toggle-chat-btn', '#chat-panel');
         await page.waitForTimeout(700);
-        await capture(page, '05-chat', captured, OUT);
+        await capture(page, '05-chat', written, captured, OUT);
 
         // 6-10. Settings tabs
         await openToolbox(page, 'Settings');
         await expect(page.locator('#close-settings-btn')).toBeVisible();
         await page.waitForTimeout(500);
-        await capture(page, '06-settings-profile', captured, OUT);
+        await capture(page, '06-settings-profile', written, captured, OUT);
 
         for (const [tab, shot] of [
             ['Devices', '07-settings-devices'],
@@ -241,7 +189,7 @@ test.describe('UI screenshot gallery', () => {
             await expect(tabButton).toHaveClass(/active/);
             await expect(page.locator(PANEL_MARKER[tab]).first()).toBeVisible();
             await page.waitForTimeout(600);
-            await capture(page, shot, captured, OUT);
+            await capture(page, shot, written, captured, OUT);
         }
         await page.locator('#close-settings-btn').click();
         await page.waitForTimeout(500);
@@ -254,12 +202,12 @@ test.describe('UI screenshot gallery', () => {
         await page.fill('#poll-option-1', 'Rust + Leptos');
         await page.fill('#poll-option-2', 'JavaScript lama');
         await page.waitForTimeout(500);
-        await capture(page, '11-polls-create', captured, OUT);
+        await capture(page, '11-polls-create', written, captured, OUT);
 
         await page.click('#create-poll-submit-btn');
         await page.locator('.modal-tab-btn:has-text("Active Polls")').click();
         await page.waitForTimeout(800);
-        await capture(page, '12-polls-active', captured, OUT);
+        await capture(page, '12-polls-active', written, captured, OUT);
         await page.locator('#close-polls-btn').click();
         await page.waitForTimeout(500);
 
@@ -267,7 +215,7 @@ test.describe('UI screenshot gallery', () => {
         await page.click('#notif-bell-btn');
         await expect(page.locator('#notif-panel')).toBeVisible();
         await page.waitForTimeout(500);
-        await capture(page, '13-notifications', captured, OUT);
+        await capture(page, '13-notifications', written, captured, OUT);
         await page.click('#notif-bell-btn');
         await page.waitForTimeout(400);
 
@@ -284,7 +232,7 @@ test.describe('UI screenshot gallery', () => {
             await page.mouse.up();
         }
         await page.waitForTimeout(900);
-        await capture(page, '14-whiteboard', captured, OUT);
+        await capture(page, '14-whiteboard', written, captured, OUT);
         await page.locator('#toggle-whiteboard-btn').dispatchEvent('click');
         await page.waitForTimeout(500);
 
@@ -292,7 +240,7 @@ test.describe('UI screenshot gallery', () => {
         await openToolbox(page, 'Virtual Background');
         await expect(page.locator('.modal-content h3')).toContainText('Virtual Background');
         await page.waitForTimeout(500);
-        await capture(page, '15-virtual-background', captured, OUT);
+        await capture(page, '15-virtual-background', written, captured, OUT);
         await page.locator('.modal-content .modal-close-btn').first().click();
         await page.waitForTimeout(500);
 
@@ -300,7 +248,7 @@ test.describe('UI screenshot gallery', () => {
         await openToolbox(page, 'Keyboard Shortcuts');
         await expect(page.locator('#close-shortcuts-btn')).toBeVisible();
         await page.waitForTimeout(500);
-        await capture(page, '16-shortcuts', captured, OUT);
+        await capture(page, '16-shortcuts', written, captured, OUT);
         await page.locator('#close-shortcuts-btn').click();
         await page.waitForTimeout(500);
 
@@ -308,7 +256,7 @@ test.describe('UI screenshot gallery', () => {
         await openToolbox(page, 'Speaker Stats');
         await expect(page.locator('#close-speaker-stats-btn')).toBeVisible();
         await page.waitForTimeout(500);
-        await capture(page, '17-speaker-stats', captured, OUT);
+        await capture(page, '17-speaker-stats', written, captured, OUT);
         await page.locator('#close-speaker-stats-btn').dispatchEvent('click');
         await page.waitForTimeout(500);
 
@@ -316,7 +264,7 @@ test.describe('UI screenshot gallery', () => {
         await openToolbox(page, 'Invite Others');
         await expect(page.locator('.modal-content h3')).toContainText('Invite');
         await page.waitForTimeout(500);
-        await capture(page, '18-invite', captured, OUT);
+        await capture(page, '18-invite', written, captured, OUT);
         await page.locator('.modal-content .modal-close-btn').first().click();
         await page.waitForTimeout(500);
 
@@ -325,7 +273,7 @@ test.describe('UI screenshot gallery', () => {
         await expect(page.locator('#submit-shared-video-btn')).toBeVisible();
         await page.fill('.modal-content input[type="text"]', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ');
         await page.waitForTimeout(500);
-        await capture(page, '19-share-video', captured, OUT);
+        await capture(page, '19-share-video', written, captured, OUT);
         await page.locator('#close-shared-video-btn').dispatchEvent('click');
         await page.waitForTimeout(500);
 
@@ -333,7 +281,7 @@ test.describe('UI screenshot gallery', () => {
         await openToolbox(page, 'Embed Meeting');
         await expect(page.locator('.dialog-content textarea')).toBeVisible();
         await page.waitForTimeout(500);
-        await capture(page, '20-embed-meeting', captured, OUT);
+        await capture(page, '20-embed-meeting', written, captured, OUT);
         await page.locator('.dialog-content .modal-close-btn').click();
         await page.waitForTimeout(500);
 
@@ -341,7 +289,7 @@ test.describe('UI screenshot gallery', () => {
         await openToolbox(page, 'Dial-in Info');
         await expect(page.locator('#dial-in-close-btn')).toBeVisible();
         await page.waitForTimeout(500);
-        await capture(page, '21-dial-in', captured, OUT);
+        await capture(page, '21-dial-in', written, captured, OUT);
         await page.locator('#dial-in-close-btn').dispatchEvent('click');
         await page.waitForTimeout(500);
 
@@ -349,7 +297,7 @@ test.describe('UI screenshot gallery', () => {
         await openToolbox(page, 'Salesforce Integration');
         await expect(page.locator('#link-salesforce-btn')).toBeVisible();
         await page.waitForTimeout(500);
-        await capture(page, '22-salesforce', captured, OUT);
+        await capture(page, '22-salesforce', written, captured, OUT);
         await page.locator('.modal-content .modal-close-btn').first().click();
         await page.waitForTimeout(500);
 
@@ -358,7 +306,7 @@ test.describe('UI screenshot gallery', () => {
         await expect(page.locator('.submit-feedback-btn')).toBeVisible();
         await page.locator('.feedback-star').nth(4).click();
         await page.waitForTimeout(500);
-        await capture(page, '23-feedback', captured, OUT);
+        await capture(page, '23-feedback', written, captured, OUT);
         await page.locator('.modal-content .modal-close-btn').first().click();
         await page.waitForTimeout(500);
 
@@ -366,7 +314,7 @@ test.describe('UI screenshot gallery', () => {
         await openToolbox(page, 'Login');
         await expect(page.locator('.login-dialog')).toBeVisible();
         await page.waitForTimeout(500);
-        await capture(page, '24-authentication', captured, OUT);
+        await capture(page, '24-authentication', written, captured, OUT);
         await page.locator('.login-cancel-btn').click();
         await page.waitForTimeout(500);
 
@@ -374,7 +322,7 @@ test.describe('UI screenshot gallery', () => {
         await openToolbox(page, 'Calendar');
         await expect(page.locator('.calendar-list-dialog')).toBeVisible();
         await page.waitForTimeout(600);
-        await capture(page, '25-calendar', captured, OUT);
+        await capture(page, '25-calendar', written, captured, OUT);
         await page.locator('.calendar-list-dialog .modal-close-btn').click();
         await page.waitForTimeout(500);
 
@@ -382,27 +330,27 @@ test.describe('UI screenshot gallery', () => {
         await openToolbox(page, 'Shared Document (Etherpad)');
         await expect(page.locator('.etherpad-container')).toBeVisible({ timeout: 10000 });
         await page.waitForTimeout(800);
-        await capture(page, '26-etherpad', captured, OUT);
+        await capture(page, '26-etherpad', written, captured, OUT);
         await page.locator('#toggle-etherpad-btn').dispatchEvent('click');
         await page.waitForTimeout(500);
 
         // 27. Files panel
         await showPanel(page, '#toggle-files-btn', '.files-container');
         await page.waitForTimeout(600);
-        await capture(page, '27-files', captured, OUT);
+        await capture(page, '27-files', written, captured, OUT);
         await page.locator('#toggle-files-btn').dispatchEvent('click');
         await page.waitForTimeout(500);
 
         // 28. Reactions
         await page.locator('.reactions button').first().click();
         await page.waitForTimeout(600);
-        await capture(page, '28-reactions', captured, OUT);
+        await capture(page, '28-reactions', written, captured, OUT);
 
         // 29. Subtitles
         await page.locator('#toggle-subtitles-btn').dispatchEvent('click');
         await expect(page.locator('.subtitles-overlay')).toBeVisible({ timeout: 10000 });
         await page.waitForTimeout(700);
-        await capture(page, '29-subtitles', captured, OUT);
+        await capture(page, '29-subtitles', written, captured, OUT);
         await page.locator('#toggle-subtitles-btn').dispatchEvent('click');
         await page.waitForTimeout(500);
 
@@ -411,7 +359,7 @@ test.describe('UI screenshot gallery', () => {
         await remoteCard.click({ button: 'right' }).catch(() => {});
         await page.waitForTimeout(700);
         if (await page.locator('.video-context-menu').isVisible().catch(() => false)) {
-            await capture(page, '30-context-menu', captured, OUT);
+            await capture(page, '30-context-menu', written, captured, OUT);
             await page.keyboard.press('Escape');
         } else {
             test.info().annotations.push({ type: 'skip', description: 'context menu not opened' });
@@ -423,7 +371,7 @@ test.describe('UI screenshot gallery', () => {
         await page.locator('.breakout-rooms button:has-text("Create")').click();
         await expect(page.locator('.rooms-list')).toContainText('Ruang Diskusi');
         await page.waitForTimeout(700);
-        await capture(page, '31-breakout-rooms', captured, OUT);
+        await capture(page, '31-breakout-rooms', written, captured, OUT);
 
         // 32. Remote control consent dialog (Bob requests control of Alice)
         await showPanel(bob, '#toggle-participants-btn', '#participants-panel');
@@ -433,14 +381,14 @@ test.describe('UI screenshot gallery', () => {
         await rcBtn.first().dispatchEvent('click');
         await expect(page.locator('.modal-content:has-text("Remote Control Request")')).toBeVisible({ timeout: 10000 });
         await page.waitForTimeout(600);
-        await capture(page, '32-remote-control', captured, OUT);
+        await capture(page, '32-remote-control', written, captured, OUT);
         await page.locator('.modal-content button:has-text("Deny")').click();
         await page.waitForTimeout(500);
 
         // 33. Room with the chat panel open (main layout reference)
         await showPanel(page, '#toggle-chat-btn', '#chat-panel');
         await page.waitForTimeout(600);
-        await capture(page, '33-room-chat-open', captured, OUT);
+        await capture(page, '33-room-chat-open', written, captured, OUT);
 
         await bob.close();
 
@@ -450,7 +398,7 @@ test.describe('UI screenshot gallery', () => {
         await joinRoom(visitor, 'Tamu Undangan', { room, visitor: true });
         await showPanel(visitor, '#toggle-chat-btn', '#chat-panel');
         await visitor.waitForTimeout(900);
-        await capture(visitor, '34-visitor-mode', captured, OUT);
+        await capture(visitor, '34-visitor-mode', written, captured, OUT);
         await visitor.close();
 
         // 35. Lobby (waiting room). A host must already be present for the
@@ -474,7 +422,7 @@ test.describe('UI screenshot gallery', () => {
             .catch(() => false);
         if (inLobby) {
             await lobbyPage.waitForTimeout(1000);
-            await capture(lobbyPage, '35-lobby', captured, OUT);
+            await capture(lobbyPage, '35-lobby', written, captured, OUT);
         } else {
             test.info().annotations.push({ type: 'skip', description: 'lobby not entered' });
         }
@@ -511,7 +459,7 @@ test.describe('UI screenshot gallery', () => {
             .catch(() => false);
         if (rejoinShown) {
             await rejoinPage.waitForTimeout(600);
-            await capture(rejoinPage, '36-rejoin-overlay', captured, OUT);
+            await capture(rejoinPage, '36-rejoin-overlay', written, captured, OUT);
         } else {
             test.info().annotations.push({ type: 'skip', description: 'rejoin overlay not shown' });
         }
@@ -525,27 +473,27 @@ test.describe('UI screenshot gallery', () => {
         await page.goto('/');
         await page.waitForSelector('#meeting-name');
         await page.waitForTimeout(700);
-        await capture(page, '37-mobile-home', captured, OUT);
+        await capture(page, '37-mobile-home', written, captured, OUT);
 
         await page.goto(`/room/${mobileRoom}`);
         await page.waitForSelector('#display-name');
         await page.waitForTimeout(900);
-        await capture(page, '38-mobile-prejoin', captured, OUT);
+        await capture(page, '38-mobile-prejoin', written, captured, OUT);
 
         await page.fill('#display-name', 'Mobile');
         await page.click('.join-btn');
         await expect(page.locator('.room-container')).toBeVisible({ timeout: 20000 });
         await page.waitForTimeout(1500);
-        await capture(page, '39-mobile-room', captured, OUT);
+        await capture(page, '39-mobile-room', written, captured, OUT);
 
         await page.locator('#toggle-chat-btn').dispatchEvent('click');
         await page.waitForTimeout(900);
-        await capture(page, '40-mobile-chat', captured, OUT);
+        await capture(page, '40-mobile-chat', written, captured, OUT);
 
         await openToolbox(page, 'Settings');
         if (await page.locator('#close-settings-btn').isVisible().catch(() => false)) {
             await page.waitForTimeout(700);
-            await capture(page, '41-mobile-settings', captured, OUT);
+            await capture(page, '41-mobile-settings', written, captured, OUT);
         } else {
             test.info().annotations.push({ type: 'skip', description: 'mobile settings not opened' });
         }
@@ -565,7 +513,7 @@ test.describe('UI screenshot gallery', () => {
         await page.click('.join-btn');
         await expect(page.locator('.room-container')).toBeVisible({ timeout: 20000 });
         await page.waitForTimeout(1500);
-        await capture(page, '43-room-long-name', captured, OUT);
+        await capture(page, '43-room-long-name', written, captured, OUT);
     });
 
     test('capture the header when the bar is narrow', async ({ page, request }) => {
@@ -581,7 +529,7 @@ test.describe('UI screenshot gallery', () => {
         await page.click('.join-btn');
         await expect(page.locator('.room-container')).toBeVisible({ timeout: 20000 });
         await page.waitForTimeout(1500);
-        await capture(page, '44-room-narrow-header', captured, OUT);
+        await capture(page, '44-room-narrow-header', written, captured, OUT);
     });
 
     test.afterAll(() => {

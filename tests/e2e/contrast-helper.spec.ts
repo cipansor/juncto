@@ -1,5 +1,11 @@
 import { expect, test } from '@playwright/test';
-import { paintedBackdrops, contrastRatio, expectReadableText } from './contrast';
+import {
+    paintedBackdrops,
+    contrastRatio,
+    expectReadableText,
+    inkBySurface,
+    type Shot,
+} from './contrast';
 
 /**
  * The contrast helper has to sample the surface behind the words, not the whole
@@ -167,6 +173,54 @@ test.describe('contrast helper sampling', () => {
         await expect(expectReadableText(page, '#t', 'faded', 4.5)).rejects.toThrow(
             /contrast 2\.4\d .* is below 4\.5/,
         );
+    });
+
+    test('a surface touched only at glyph edges is still scored', async ({ page }) => {
+        // Over video the backdrop is nearly a different colour at every pixel, so
+        // a surface can be grazed by a glyph without any of its pixels being
+        // covered enough to measure ink from. The real room header has exactly
+        // such a surface (one of eight, measured). Dropping it would score only
+        // the backgrounds that happened to be measured well, and the grazed patch
+        // would never be reported.
+        //
+        // Built from pixels rather than a rendered page: reaching this state by
+        // laying out text is a matter of sub-pixel luck, and the point here is
+        // the scoring rule, not the rasteriser.
+        const width = 4;
+        const height = 1;
+        const px = (...rows: number[][]) => Buffer.from(rows.flat());
+        // Glyphs cover pixels 0..2; pixel 3 is grazed (coverage 0.2).
+        const glyphs = new Uint8Array([1, 1, 1, 1]);
+        const coverage = new Float32Array([1, 1, 1, 0.2]);
+        const painted: Shot = {
+            width,
+            height,
+            channels: 3,
+            // Pixel 3 is a bright surface no fully covered pixel sits on.
+            pixels: px([0, 0, 0], [0, 0, 0], [0, 0, 0], [250, 250, 250]),
+        };
+        const rendered: Shot = {
+            width,
+            height,
+            channels: 3,
+            // White text: invisible on the black pixels, invisible on the bright one.
+            pixels: px([255, 255, 255], [255, 255, 255], [255, 255, 255], [252, 252, 252]),
+        };
+        const pairs = inkBySurface(rendered, painted, glyphs, coverage, {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        });
+        const surfaces = pairs.map((p) => p.surface.join(','));
+        expect(surfaces, 'the grazed surface must be scored, not dropped').toContain(
+            '250,250,250',
+        );
+        const grazed = pairs.find((p) => p.surface.join(',') === '250,250,250')!;
+        expect(
+            contrastRatio(grazed.ink, grazed.surface),
+            'white on a near-white patch is unreadable',
+        ).toBeLessThan(3);
     });
 
     test('a readable sibling cannot carry a translucent one', async ({ page }) => {

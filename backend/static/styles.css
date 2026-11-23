@@ -238,11 +238,6 @@ body {
     white-space: nowrap;
 }
 
-@container (max-width: 520px) {
-    .room-header-prefix {
-        display: none;
-    }
-}
 
 .header-badges {
     display: flex;
@@ -1783,6 +1778,16 @@ p.form-error, .form-error {
         padding: 16px;
         max-width: 95vw;
         border-radius: var(--radius-lg);
+    }
+}
+
+/* A container query, not a window query: the bar's width is what matters, and
+   the side panel is open by default above 768px and takes 340px, so a 780px
+   viewport leaves a 440px bar that no media query can see. It sits with the
+   responsive rules below for that reason. */
+@container (max-width: 520px) {
+    .room-header-prefix {
+        display: none;
     }
 }
 
