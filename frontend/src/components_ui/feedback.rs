@@ -25,7 +25,7 @@ pub fn FeedbackDialog(show: ReadSignal<bool>, on_close: Callback<()>) -> impl In
             let feedback = Feedback {
                 stars: s,
                 comment: c,
-                user_id: None,
+                user_id: Some(crate::storage::client_id()),
             };
 
             let client = gloo_net::http::Request::post("/api/feedback").json(&feedback);

@@ -285,6 +285,10 @@ pub enum ClientMessage {
     /// is stored on the room and required for subsequent joins. `None` locks
     /// without a password (joins are rejected outright).
     ToggleRoomLock(Option<String>),
+    /// Replace the password of an already-locked room without toggling the lock.
+    /// `None` (or an empty string) removes the password, making the lock a hard
+    /// lock that rejects every new join.
+    SetRoomPassword(Option<String>),
     ToggleRecording,
     ToggleAudioModeration,
     ToggleVideoModeration,
@@ -636,6 +640,87 @@ pub fn is_valid_css_hex_color(value: &str) -> bool {
         return false;
     };
     matches!(hex.len(), 3 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Extracts the video id from a YouTube URL the embed player can render.
+///
+/// Shared by the dialog that validates the link, the grid that renders the
+/// embed, and the server that relays it, so an accepted URL always plays and a
+/// rejected one is never broadcast. Returns `None` for non-YouTube links and
+/// for anything without a well-formed id.
+///
+/// The path, query and fragment are parsed separately. Scanning the whole URL
+/// for `v=` would accept `https://www.youtube.com#v=<id>` — the homepage with a
+/// fragment — and embed a video for a link that is not a video page.
+///
+/// Recognised shapes:
+/// - `youtu.be/<id>`
+/// - `youtube.com/watch?v=<id>` (also `m.youtube.com`), where `v` must be an
+///   exact query key, not a fragment or part of another key's value
+/// - `youtube.com/embed/<id>`
+/// - `youtube.com/shorts/<id>`
+/// - `youtube.com/live/<id>` — what the "Share" button produces for a stream
+pub fn youtube_video_id(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let (scheme, after_scheme) = trimmed.split_once("://")?;
+    if !matches!(scheme, "https" | "http") {
+        return None;
+    }
+    // The authority ends at the first `/`, `?` or `#`; using only `/` would
+    // misread `youtube.com?v=...` and let a crafted authority through.
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let (host, rest) = after_scheme.split_at(authority_end);
+    let host = host.trim_start_matches("www.").to_ascii_lowercase();
+    let is_youtube = matches!(
+        host.as_str(),
+        "youtube.com" | "m.youtube.com" | "youtu.be" | "youtube-nocookie.com"
+    );
+    if !is_youtube {
+        return None;
+    }
+
+    // Split the fragment off first, then the query: a `#` may contain `?`, but
+    // a `?` never contains a `#` that belongs to the path.
+    let rest = rest.strip_prefix('/').unwrap_or(rest);
+    let (rest, _fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    // Trailing slashes are harmless on path-id routes (`/embed/<id>/`).
+    let path = path.trim_end_matches('/');
+
+    if host == "youtu.be" {
+        return is_youtube_video_id(path).then(|| path.to_string());
+    }
+    // The watch route reads the id from the query; every other route carries
+    // it in the path. The homepage has no path, so it is rejected even when a
+    // `v` appears in its query or fragment.
+    if path == "watch" || path == "watch/" {
+        let id = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("v="))
+            .unwrap_or("");
+        return is_youtube_video_id(id).then(|| id.to_string());
+    }
+    let id = ["embed/", "shorts/", "live/"]
+        .iter()
+        .find_map(|prefix| path.strip_prefix(prefix))
+        .unwrap_or("");
+    // A nested path (`embed/<id>/extra`) is not a video page.
+    if id.contains('/') {
+        return None;
+    }
+    is_youtube_video_id(id).then(|| id.to_string())
+}
+
+/// A YouTube video id is exactly 11 characters from the URL-safe base64
+/// alphabet. Length matters: a truncated id (or the literal `ID` from the
+/// placeholder) is nonempty and URL-safe but cannot identify a video.
+pub fn is_youtube_video_id(id: &str) -> bool {
+    id.len() == 11
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Returns `true` if `url` is an acceptable branding logo URL: an absolute

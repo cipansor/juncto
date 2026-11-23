@@ -119,7 +119,7 @@ pub fn NotificationBell() -> impl IntoView {
             >
                 "🔔"
                 <Show when=move || { ctx.unread.get() > 0 }>
-                    <span class="notif-badge" style="background: #dc3545; border-radius: 50%; padding: 2px 5px; font-size: 10px; margin-left: 4px;">
+                    <span class="notif-badge">
                         {move || ctx.unread.get()}
                     </span>
                 </Show>
