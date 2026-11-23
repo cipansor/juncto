@@ -297,6 +297,12 @@ test.describe('Dialog contrast audit', () => {
         // badge. The count is pinned to the corner now, so the button keeps its
         // width however large the count gets — which is what this measures, at
         // the width the user actually gets.
+        //
+        // Both the button and the count are measured, because the count is
+        // drawn outside the button: it hangs past the right edge and grows
+        // leftwards, so the button's rect stays 30px while the count walks
+        // towards the lock badge. Measuring the button alone passes while the
+        // count is 80px too wide.
         for (const width of [1440, 768, 600, 390]) {
             await page.setViewportSize({ width, height: 800 });
             const room = `BellCount_${width}_${Date.now()}`;
@@ -334,21 +340,40 @@ test.describe('Dialog contrast audit', () => {
 
             const measured = await visitor.evaluate(() => {
                 const bell = document.querySelector('#notif-bell-btn') as HTMLElement;
+                const count = document.querySelector('#notif-bell-btn .notif-badge') as HTMLElement;
                 const badge = document.querySelector(
                     '.room-header .badge-success, .room-header .badge-danger',
                 ) as HTMLElement;
-                if (!bell || !badge) return null;
-                const b = badge.getBoundingClientRect();
-                const c = bell.getBoundingClientRect();
+                if (!bell || !count || !badge) return null;
+                const lock = badge.getBoundingClientRect();
+                const button = bell.getBoundingClientRect();
+                // The count is positioned outside the button, so the button's
+                // own rect says nothing about where the count lands: it hangs
+                // 6px past the right edge and grows leftwards with each digit.
+                // What has to clear the lock badge is everything the control
+                // draws, so take the union of the two rects first — measuring
+                // each separately against the badge would report the gap
+                // between them as clearance.
+                const drawn = count.getBoundingClientRect();
+                const left = Math.min(button.left, drawn.left);
+                const right = Math.max(button.right, drawn.right);
                 return {
-                    clearance: Math.round(Math.min(b.right, c.right) - Math.max(b.left, c.left)),
+                    clearance: Math.round(Math.min(lock.right, right) - Math.max(lock.left, left)),
+                    countLeftOfButton: Math.round(button.left - drawn.left),
                 };
             });
-            expect(measured, `header badges and bell must exist at ${width}px`).not.toBeNull();
+            expect(measured, `header badges, bell and count must exist at ${width}px`).not.toBeNull();
             expect(
                 measured!.clearance,
-                `the bell with a two-digit count must not reach the badge at ${width}px`,
+                `the bell and its count must not reach the badge at ${width}px`,
             ).toBeLessThanOrEqual(0);
+            // The count must stay within the corner the header reserves for the
+            // bell. A count that grows leftwards is the failure this catches:
+            // the button keeps its 30px, so only the count's own rect shows it.
+            expect(
+                measured!.countLeftOfButton,
+                `the count must not grow past the bell at ${width}px`,
+            ).toBeLessThanOrEqual(6);
 
             // The count is white on a red fill, so it needs its own floor: the
             // red that reads as "alert" (`--danger-color`) only reaches 3.6:1
