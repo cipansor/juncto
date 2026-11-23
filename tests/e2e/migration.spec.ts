@@ -174,8 +174,8 @@ test('Juncto Migration E2E (WASM)', async ({ page, request }) => {
   // Ideally, find the list item for "E2E User" or "User ..." and check for hand emoji
   await expect(page.locator('.participants-list li').filter({ hasText: 'Updated Name' })).toContainText('✋');
 
-  // Lower hand
-  await handBtn.click();
+  // Lower hand; the control relabels itself once the hand is up
+  await page.getByRole('button', { name: 'Lower Hand' }).click();
   // Verify hand icon removed (might need short wait or check lack of text)
   await expect(page.locator('.participants-list li').filter({ hasText: 'Updated Name' })).not.toContainText('✋');
 
@@ -1058,7 +1058,7 @@ test('Participant Sorting E2E Explicit', async ({ browser, request }) => {
     await expect(page1.locator('.participants-list li').first()).toContainText('Zack');
 
     // Zack lowers hand
-    await page2.click('button:has-text("Raise Hand")');
+    await page2.click('button:has-text("Lower Hand")');
 
     // Expected Order: Adam, Zack
     await expect(page1.locator('.participants-list li').first()).toContainText('Adam');

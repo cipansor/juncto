@@ -10,10 +10,18 @@ pub fn Home() -> impl IntoView {
     let settings = crate::storage::load_settings();
     let (recent_rooms, _set_recent_rooms) = signal(settings.recent_rooms);
 
+    let (name_error, set_name_error) = signal(false);
     let nav_create = navigate.clone();
     let create_meeting = move |_| {
         let name = room_name.get();
-        let url = create_room_url(&name);
+        // A whitespace-only name produces the route /room/%20%20%20, which
+        // silently creates a room nobody can find again.
+        if name.trim().is_empty() {
+            set_name_error.set(true);
+            return;
+        }
+        set_name_error.set(false);
+        let url = create_room_url(name.trim());
         nav_create(&url, Default::default());
     };
 
@@ -29,10 +37,18 @@ pub fn Home() -> impl IntoView {
                         type="text"
                         id="meeting-name"
                         class="styled-input"
-                        on:input=move |ev| set_room_name.set(event_target_value(&ev))
+                        on:input=move |ev| {
+                            set_room_name.set(event_target_value(&ev));
+                            set_name_error.set(false);
+                        }
                         prop:value=room_name
                         placeholder="Enter meeting name..."
                     />
+                    <Show when=move || name_error.get()>
+                        <p id="meeting-name-error" class="form-error">
+                            "Enter a room name to start a meeting."
+                        </p>
+                    </Show>
                 </div>
 
                 <button

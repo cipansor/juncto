@@ -127,8 +127,12 @@ async fn main() {
     let static_dir = format!("{}/static", env!("CARGO_MANIFEST_DIR"));
 
     // Define the router
+    // `fallback` (not `not_found_service`) keeps the status at 200 for unknown
+    // paths: the SPA owns client-side routes such as /room/<name>, and a 404
+    // makes browsers, crawlers and health probes treat a valid deep link as a
+    // missing page.
     let serve_dir = ServeDir::new(&frontend_pkg)
-        .not_found_service(ServeFile::new(format!("{}/index.html", frontend_pkg)));
+        .fallback(ServeFile::new(format!("{}/index.html", frontend_pkg)));
     let serve_static = ServeDir::new(&static_dir);
 
     let app = Router::new()
@@ -144,5 +148,12 @@ async fn main() {
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     println!("Listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    // `with_connect_info` makes the peer address available to handlers, which
+    // the feedback rate limiter uses as a non-spoofable backstop.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }
