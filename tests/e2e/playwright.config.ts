@@ -13,6 +13,12 @@ const repoRoot = path.resolve(__dirname, '..', '..');
 const adminToken = process.env.E2E_ADMIN_TOKEN ?? crypto.randomUUID();
 process.env.E2E_ADMIN_TOKEN = adminToken;
 
+// Same reason: a retried test runs in a fresh worker with a fresh module
+// instance, so anything the spec keeps in memory is lost between attempts. A
+// run-scoped id lets the gallery record its captures on disk and read them back
+// from a retry.
+process.env.E2E_RUN_ID = process.env.E2E_RUN_ID ?? crypto.randomUUID();
+
 export default defineConfig({
   testDir: './',
   timeout: 120000, // Increase global test timeout to 2 minutes

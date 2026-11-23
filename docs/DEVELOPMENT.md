@@ -119,11 +119,34 @@ PNG per screen to `tests/screenshots/`. It is the source of every image in the R
 cd tests/e2e && npx playwright test screenshot-gallery.spec.ts
 ```
 
-The file names are ordered and stable (`01-home.png` … `41-mobile-settings.png`). If you
+The file names are ordered and stable (`01-home.png` … `44-room-narrow-header.png`). If you
 add a screen, append the next number; if you renumber, update the README tables in the same
-commit. Screens that depend on timing (the lobby, the reconnect overlay) are captured
-behind an explicit visibility check and are skipped with an annotation rather than failing
-the suite when the state cannot be reached.
+commit.
+
+Every capture goes through a `capture()` helper that records the name as it is written, and
+two assertions run in `afterAll`:
+
+* **No duplicate numbers** — a repeated prefix makes the gallery order ambiguous and
+  collides in the README tables. Checking the output directory cannot catch this (a clean
+  checkout has no files, and two same-named captures leave one file behind), so the names
+  are recorded as they are written instead.
+* **No missing screens** — `REQUIRED_SHOTS` lists every view the gallery must produce.
+  Several captures are conditional (the lobby, the reconnect overlay, the context menu,
+  the mobile settings dialog) and skip themselves when the state cannot be reached; without
+  the manifest a skipped capture is simply absent and the run still passes, leaving a
+  broken image in the README.
+
+The recorded names are written to a manifest under the OS temp directory, keyed by the run
+id in `E2E_RUN_ID` (set once in `playwright.config.ts`). This is not bookkeeping: CI runs
+with `retries: 2`, and a retry starts a fresh worker with a fresh module instance, so an
+in-memory list is empty on the second attempt. `afterAll` then reported every view from the
+first attempt as missing and failed a run whose files were all present. Keeping the list on
+disk makes the completeness check answer the question it is meant to — did this run capture
+everything? — across attempts.
+
+Screens that depend on timing are still skipped with an annotation rather than failing on
+the spot, but a skip now fails the run at the end. When that happens, the fix is to make the
+state reachable, not to drop the entry from `REQUIRED_SHOTS`.
 
 Two of the captures need setup worth knowing about:
 
@@ -135,10 +158,122 @@ Two of the captures need setup worth knowing about:
 
 ### The contrast audit
 
-`contrast-audit.spec.ts` opens every dialog and measures the contrast ratio between the
-resolved text colour and the effective backdrop, computed by compositing translucent
-backgrounds up the ancestor chain. It fails when any dialog drops below the WCAG AA floor
-(3:1 for large text — the headings and labels here) or renders on a near-white surface.
+`contrast-audit.spec.ts` opens every dialog and measures the contrast ratio between each
+run of text and the surface actually painted behind it. It fails when any dialog drops below
+the WCAG AA floor (3:1 for large text — the headings and labels here) or renders on a
+near-white surface.
+
+The shared helper (`contrast.ts`) samples the rendered pixels rather than reconstructing the
+backdrop from CSS, because a `background-color` walk cannot see what the browser composites:
+the landing page paints a radial gradient in `background-image` behind a translucent card
+with `backdrop-filter`, so a reconstructed colour would be the card over the body, not the
+card over the gradient users see. Five details make the sample honest:
+
+* **Text hidden before sampling.** The surface is read from a screenshot taken with
+  `-webkit-text-fill-color: transparent` on the audited subtree, so every pixel in a line
+  box is the surface behind the words. `-webkit-text-fill-color` is used rather than
+  `color: transparent` because it leaves backgrounds, borders and shadows alone — a
+  `background: currentColor` would otherwise vanish and change the surface being measured.
+* **Glyph footprint from two forced fills, never from colour.** The mask comes from two
+  further screenshots with the text painted magenta and then green; a pixel is glyph paint
+  when it differs between them. Inferring the mask from colour cannot be made sound: a
+  filter that keeps pixels resembling the text deletes the unreadable case it exists for,
+  and a filter that keeps pixels resembling a probe counts any decoration that happens to
+  look like one — a near-magenta strip beside the words was counted as text and made white
+  letters fail at 3.18:1 against a band they never touched. Diffing a single probe against
+  the hidden-text shot is not enough either: a glyph painted the same colour as its
+  backdrop changes nothing there. Two forced fills differ from *each other* whatever lies
+  underneath, so neither is blind. Both shots are forced rather than one being the real
+  render for the same reason.
+* **Per text run, with the ink measured from pixels.** Colour is read per text node, not
+  from the audited element. The audit target is often a container — `.chat-container` holds a
+  white heading, a muted label and a white-on-blue button — so the container's own colour
+  (black, inherited) scored against the dark card would report 1.44:1 for a container whose
+  text is all legible. The ink itself is *measured*, not modelled from `color` and `opacity`.
+  Modelling cannot work: `opacity` multiplies a whole subtree, so a faded panel and the text
+  inside it fade together and the text keeps its declared colour relative to that panel.
+  Black text on a half-opacity white panel over black renders at 5.32:1; fading the declared
+  colour without fading the panel reports 2.63:1 and rejects readable text. Measuring the ink
+  avoids the question entirely. Glyph edges are antialiased toward the surface, so most glyph
+  pixels are a blend; the ink is taken from the tenth of glyph pixels that differ most from
+  their own surface, which are the ones with the highest coverage. Averaging, or taking the
+  darkest and lightest tenths, lets a half-covered edge stand in for the ink — on the room
+  header that read the green badge as `rgb(9, 111, 77)` against `rgb(9, 28, 37)` where the
+  ink is `rgb(16, 185, 129)`, and the audit failed a legible badge.
+  One ink is measured per run and scored against every surface under it, rather than per
+  surface: a text rect grazing a border splits into several surfaces, and the sliver over the
+  border holds only edge pixels. Scoring one ink against every surface is still sound for
+  text straddling a boundary — white letters over a black/white split measure as white and
+  fail at 1.00:1 against the white half.
+* **Per line box.** The sample is restricted to the text's own line boxes, so a short
+  message in a wide paragraph is measured where the glyphs are, not where the box happens
+  to be empty. A gradient crossing the text yields one surface per line and the worst line
+  decides.
+* **Every colour under the glyphs, worst wins.** Within a line, each colour painted under
+  the letters is scored and the lowest ratio is reported. There is no minimum share: a
+  narrow unreadable band is exactly the case that matters, and a threshold discards
+  precisely that. A share also depends on how wide the font renders, so a thresholded
+  audit can change verdict between machines.
+
+Animation and the text caret are frozen for the duration of the probe (`animation: none`,
+`caret-color: transparent` on the audited subtree). Four screenshots of a moving element are
+four different frames: a fading label moved between the surface shot and the mask shot, so
+the surface sampled under its glyphs was the glyph itself and the chat panel reported 1.11:1
+instead of 3.98:1. A frozen frame is the only thing that can be measured. Note that freezing
+pins the *first* keyframe, not the settled state: a fade that begins unreadable is reported
+unreadable, which is the conservative reading. The chat-panel assertion in
+`contrast-audit.spec.ts` is what proves this — removing the freeze turns it red at 1.11:1,
+whereas a synthetic fade in the helper spec was too slow to land mid-frame and passed either
+way.
+
+**Line geometry is read inside the frozen window too**, in the same call that takes the
+screenshots. Reading it afterwards restores the animation first, so an entrance transition
+slides the text between the rects and the pixels; the mask is then sampled where the text used
+to be, finds no glyphs, and the line is skipped — a vacuous pass rather than a failure. This
+is why `glyphLayers` returns the runs as well as the shots: the two have to come from one
+frame.
+
+**Text is clipped to what is actually visible.** `getClientRects` reports where text *would*
+be laid out, not where it can be seen, so a title clipped with `overflow: hidden` still
+reports its full unwrapped width — the room header's `<h2>` clipped at 836px but reported a
+1202px text rect. Sampling the clipped-away part measures glyphs that are not on screen and
+pairs them with whatever lies behind the element; the header's long name then read as white
+on the pale page at 2.45:1. Every clipping ancestor is intersected in turn, so text inside a
+scrolling panel is measured only where it is visible.
+
+That clipping exposed a real layout defect rather than a measurement one. `.room-header` is a
+single flex row, and with no shrink limit the title grew to its full text width, the row
+overflowed, and the badges were laid out past the right edge of the bar onto the page behind
+it — genuinely unreadable, and reported by the audit as light-on-light. The title now
+shrinks (`min-width: 0`, `overflow: hidden`, `text-overflow: ellipsis`), and
+`contrast-audit.spec.ts` asserts both that the header does not overflow and that the badges
+stay inside the viewport, with a room name long enough to overflow at every width so the
+verdict does not depend on font metrics.
+
+A second defect surfaced the same way. The notification bell is absolutely positioned
+over the top-right corner of `.capture-area`, which is exactly where the header's badges
+end. Nothing in the bar pushed it away, so the "🔔" covered the last few pixels of
+"Unlocked" — 7px at 1440, and on CI, where the emoji falls back to a wider font, the whole
+word. The badge's green text was then sampled against the bell's gold pixels and the audit
+reported 1.10:1 for text that is legible. The header now reserves that corner
+(`padding-right`), and `contrast-audit.spec.ts` scales the bell up to reproduce the CI font
+wherever it runs, asserting that no badge text is covered and that the header still scores
+above 3:1.
+
+The ink is read **per surface**, not once per run. One ink for the whole run is a false
+pass the moment the text is translucent: half-opacity black over a white/black split measures
+as `rgb(128, 128, 128)`, which clears 3:1 against *both* halves, while the letters over the
+black half are pure black and invisible. `inkBySurface` groups the glyph pixels by the surface
+under each one, measures the best-covered ink within each group, and scores that pair. A
+group holding only a sliver of edge pixels can only lower a score, never raise one.
+
+Only rows inside the screenshot are read. A line below the fold has no pixels to measure,
+and reading past the last row yields `undefined` channels and a `NaN` ratio. A `NaN` does
+not survive to the assertion — `toBeGreaterThanOrEqual` rejects it — but it can vanish
+first, because the worst-score selection compares with `<`, which is false for `NaN`, so a
+`NaN` line is skipped and never becomes the reported worst. The line would then be counted
+as measured without being scored. Offscreen lines are skipped explicitly, and an element
+with nothing visible to measure fails with `no visible text line to measure`.
 
 This exists because the React → Rust cutover left several dialogs with browser-default text
 on a white panel: legible in a diff, invisible on screen, and easy to miss even in a
@@ -150,6 +285,28 @@ cd tests/e2e && npx playwright test contrast-audit.spec.ts
 
 It prints a per-dialog ratio table on the way through, which is handy when you are
 adjusting a specific panel.
+
+### The room header on a narrow screen
+
+The header is one flex row: logo, title, subject, timer, connection dot and badges. Two
+things about it are easy to get wrong, and both are pinned by tests.
+
+**The title spends the bar on a prefix.** Above 768px the chat panel is open by default and
+takes 340px, so a 780px window leaves a 440px header. The title used to be a single string,
+`Meeting Room: <name>`, and at that width the generic prefix consumed the whole heading: the
+bar showed `Meeting R` and the room name itself was never visible. The prefix is now its own
+element (`.room-header-prefix`) and the name is `.room-name`, which carries the truncation.
+A **container query** on `.room-header` hides the prefix below 520px of *bar* width. It has
+to be a container query, not a media query: the thing that squeezes the bar is the side
+panel, which the window width does not describe.
+
+**The bell needs its corner at every width.** The notification bell is absolutely positioned
+over the top-right corner of `.capture-area`, which is where the header's badges end. The
+header reserves that corner with `padding-right`, but the mobile rule
+(`@media (max-width: 768px)`) sets `.room-header`'s padding wholesale and used to give the
+corner back: at 768px the bell covered 30px of the lock badge. The reserve is repeated in the
+mobile rule. If you touch either padding, run `contrast-audit.spec.ts` — it checks both the
+desktop and the mobile case, and the failure shows up as a contrast ratio, not as an overlap.
 
 ## Stylesheet and design tokens
 

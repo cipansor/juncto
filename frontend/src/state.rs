@@ -161,6 +161,7 @@ pub struct RoomState {
     pub start_share_video: Callback<String>,
     pub stop_share_video: Callback<()>,
     pub toggle_lock: Callback<Option<String>>,
+    pub set_room_password: Callback<Option<String>>,
     /// True when the server rejected the join because the room is locked
     /// with a password. The prejoin UI shows a password field in that case.
     pub password_required: ReadSignal<bool>,
@@ -1126,6 +1127,15 @@ pub fn use_room_state() -> RoomState {
         analytics_for_lock.track_interaction("toggle_lock");
         if let Some(socket) = ws.get() {
             let msg = ClientMessage::ToggleRoomLock(password);
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send_with_str(&json);
+            }
+        }
+    });
+
+    let set_room_password = Callback::new(move |password: Option<String>| {
+        if let Some(socket) = ws.get() {
+            let msg = ClientMessage::SetRoomPassword(password);
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = socket.send_with_str(&json);
             }
@@ -2142,6 +2152,7 @@ pub fn use_room_state() -> RoomState {
         send_ping,
         send_message,
         toggle_lock,
+        set_room_password,
         password_required,
         toggle_e2ee,
         toggle_participant_e2ee,

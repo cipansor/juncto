@@ -41,6 +41,10 @@ fn App() -> impl IntoView {
     provide_i18n_context();
     provide_toast_context();
 
+    // Materialise the browser identifier before any route renders, so it exists
+    // from the first page view rather than only after the first feedback submit.
+    let _ = storage::client_id();
+
     // Check for WebRTC support (RTCPeerConnection)
     let is_webrtc_supported = if let Some(window) = web_sys::window() {
         js_sys::Reflect::has(&window, &JsValue::from_str("RTCPeerConnection")).unwrap_or(false)
