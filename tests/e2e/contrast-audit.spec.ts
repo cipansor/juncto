@@ -380,10 +380,18 @@ test.describe('Dialog contrast audit', () => {
                 `the count must fit the ${reservedCorner}px corner reserved for the bell at ${width}px`,
             ).toBeLessThanOrEqual(reservedCorner);
 
+            // The count is white on a red fill, so it needs its own floor: the
+            // red that reads as "alert" (`--danger-color`) only reaches 3.6:1
+            // behind white, and this is small text. Sample it before the width
+            // below is forced: the check is meant to score the badge as shipped,
+            // and a later step must not quietly change what it measures.
+            await expectReadableText(visitor, '#notif-bell-btn .notif-badge', `unread count at ${width}px`);
+
             // So a 44px count — three digits — has to be accepted: it hangs 6px
             // past the bell and reaches 38px back, inside the 52px corner and
             // clear of the lock badge. Bounding it against the bell instead
-            // would reject a layout that touches nothing.
+            // would reject a layout that touches nothing. Geometry only: the
+            // contrast above is measured on the shipped badge, not this one.
             if (width === 768) {
                 await visitor.addStyleTag({
                     content: '#notif-bell-btn .notif-badge { min-width: 44px !important; }',
@@ -395,10 +403,6 @@ test.describe('Dialog contrast audit', () => {
                 expect(wide!.clearance, 'a 44px count must clear the lock badge').toBeLessThanOrEqual(0);
             }
 
-            // The count is white on a red fill, so it needs its own floor: the
-            // red that reads as "alert" (`--danger-color`) only reaches 3.6:1
-            // behind white, and this is small text.
-            await expectReadableText(visitor, '#notif-bell-btn .notif-badge', `unread count at ${width}px`);
             await visitor.close();
         }
     });
