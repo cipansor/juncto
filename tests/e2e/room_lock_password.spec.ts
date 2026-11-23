@@ -557,7 +557,38 @@ test('a password replaced by another host can be restored after a handoff back',
         await bobPage.fill('#lock-password-input', 'planning43');
         await expect(bobPage.locator('#apply-password-btn')).toBeEnabled();
         await bobPage.click('#apply-password-btn');
+        // Apply is optimistic: the click returns before the server answers, so
+        // wait for the dialog to report the stored password before handing
+        // control back. Without this the test would pass on Alice's original
+        // password even if Bob's update never arrived.
+        await expect(
+            bobPage.locator('.settings-hint').filter({
+                hasText: 'Guests need this password to join',
+            }),
+        ).toBeVisible({ timeout: 10000 });
+        await expect(bobPage.locator('#apply-password-btn')).toBeDisabled();
         await bobPage.click('#close-settings-btn');
+
+        // Prove the replacement reached the server: the original password must
+        // no longer admit anyone. Asserting this before the handoff is what
+        // stops the final step from passing on the pre-handoff password.
+        const probeCtx = await browser.newContext();
+        try {
+            const probePage = await probeCtx.newPage();
+            await probePage.goto(roomUrl);
+            await probePage.fill('.prejoin-container input[type="text"]', 'Probe');
+            await probePage.click('button.join-btn');
+            await expect(probePage.locator('#room-password')).toBeVisible({ timeout: 10000 });
+            await probePage.fill('#room-password', 'planning42');
+            await probePage.click('button.join-btn');
+            await expect(
+                probePage.locator('.toast-container .toast-error').filter({
+                    hasText: 'Invalid room password',
+                }),
+            ).toBeVisible({ timeout: 10000 });
+        } finally {
+            await probeCtx.close();
+        }
 
         // Hand control back to Alice.
         await transferHostTo(bobPage, 'Alice');
