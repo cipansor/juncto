@@ -495,3 +495,157 @@ fn test_is_same_chat_distinguishes_attachment_only_messages() {
     assert!(!is_same_chat(&a, &b));
     assert!(is_same_chat(&a, &a.clone()));
 }
+
+#[test]
+fn youtube_ids_are_extracted_from_every_supported_url_shape() {
+    use crate::youtube_video_id;
+
+    let id = "abcdefghijk";
+    for url in [
+        format!("https://www.youtube.com/watch?v={id}"),
+        format!("https://www.youtube.com/watch?v={id}&t=42s"),
+        format!("https://m.youtube.com/watch?v={id}"),
+        format!("https://youtu.be/{id}"),
+        format!("https://youtu.be/{id}?si=share-token"),
+        format!("https://www.youtube.com/embed/{id}"),
+        format!("https://www.youtube.com/shorts/{id}"),
+        format!("https://www.youtube.com/live/{id}"),
+        format!("https://www.youtube.com/live/{id}?si=share-token"),
+        format!("  https://www.youtube.com/watch?v={id}  "),
+    ] {
+        assert_eq!(
+            youtube_video_id(&url).as_deref(),
+            Some(id),
+            "expected id from {url:?}"
+        );
+    }
+}
+
+#[test]
+fn livestream_share_links_keep_working() {
+    // Regression: `/live/<id>` is what YouTube's Share button produces for a
+    // stream. Rejecting it silently dropped a link the old player could embed.
+    let id = crate::youtube_video_id("https://www.youtube.com/live/abcdefghijk?si=token")
+        .expect("livestream share link should be accepted");
+    assert_eq!(id, "abcdefghijk");
+    assert_eq!(
+        format!("https://www.youtube.com/embed/{id}?autoplay=1"),
+        "https://www.youtube.com/embed/abcdefghijk?autoplay=1"
+    );
+}
+
+#[test]
+fn truncated_video_ids_are_rejected() {
+    use crate::youtube_video_id;
+
+    // Regression: these are nonempty and URL-safe, so a length-agnostic check
+    // accepted them and broadcast an unplayable tile.
+    for url in [
+        "https://www.youtube.com/watch?v=ID", // the placeholder text itself
+        "https://www.youtube.com/watch?v=abc", // truncated
+        "https://www.youtube.com/watch?v=abcdefghij", // one short
+        "https://www.youtube.com/watch?v=abcdefghijkl", // one long
+        "https://youtu.be/abc",
+        "https://www.youtube.com/live/abcdefghij",
+        "https://www.youtube.com/shorts/abcdefghijkl",
+    ] {
+        assert_eq!(youtube_video_id(url), None, "expected reject for {url:?}");
+    }
+}
+
+#[test]
+fn non_youtube_and_malformed_urls_are_rejected() {
+    use crate::youtube_video_id;
+
+    for url in [
+        "https://vimeo.com/123456789",
+        "https://www.youtube.com/",
+        "https://www.youtube.com/watch",
+        "https://www.youtube.com/channel/abcdefghijk",
+        "ftp://www.youtube.com/watch?v=abcdefghijk",
+        "javascript:alert(1)//youtube.com/watch?v=abcdefghijk",
+        "https://evil.com/youtube.com/watch?v=abcdefghijk",
+        "not a url",
+        "",
+    ] {
+        assert_eq!(youtube_video_id(url), None, "expected reject for {url:?}");
+    }
+}
+
+#[test]
+fn youtube_ids_reject_non_url_safe_characters() {
+    use crate::youtube_video_id;
+
+    assert_eq!(
+        youtube_video_id("https://www.youtube.com/watch?v=abcdefghij!"),
+        None
+    );
+    assert_eq!(
+        youtube_video_id("https://www.youtube.com/watch?v=abcdefghij "),
+        None
+    );
+}
+
+#[test]
+fn pathless_youtube_urls_are_rejected_even_with_a_v_parameter() {
+    use crate::youtube_video_id;
+
+    // Regression: the parser scanned the whole URL for `v=`, so the homepage
+    // with a fragment (or a query) parsed as a watch page and embedded a video
+    // for a link that is not a video page.
+    for url in [
+        "https://www.youtube.com#v=dQw4w9WgXcQ",
+        "https://www.youtube.com?v=dQw4w9WgXcQ",
+        "https://www.youtube.com/?v=dQw4w9WgXcQ",
+        "https://www.youtube.com/#v=dQw4w9WgXcQ",
+        "https://m.youtube.com#v=dQw4w9WgXcQ",
+        "https://youtu.be#v=dQw4w9WgXcQ",
+        "https://www.youtube.com/feed/subscriptions?v=dQw4w9WgXcQ",
+    ] {
+        assert_eq!(youtube_video_id(url), None, "expected reject for {url:?}");
+    }
+}
+
+#[test]
+fn watch_ids_come_from_the_query_not_the_fragment() {
+    use crate::youtube_video_id;
+
+    // `v` must be an exact query key on the watch route.
+    assert_eq!(
+        youtube_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ#t=10").as_deref(),
+        Some("dQw4w9WgXcQ")
+    );
+    // A fragment is not a query: `#v=` on the watch path has no id.
+    assert_eq!(
+        youtube_video_id("https://www.youtube.com/watch#v=dQw4w9WgXcQ"),
+        None
+    );
+    // `v` inside another key's value must not count.
+    assert_eq!(
+        youtube_video_id("https://www.youtube.com/watch?list=x&vv=dQw4w9WgXcQ"),
+        None
+    );
+    assert_eq!(
+        youtube_video_id("https://www.youtube.com/watch?list=v=dQw4w9WgXcQ"),
+        None
+    );
+}
+
+#[test]
+fn path_routes_do_not_accept_an_id_through_the_query() {
+    use crate::youtube_video_id;
+
+    for url in [
+        "https://www.youtube.com/embed?v=dQw4w9WgXcQ",
+        "https://www.youtube.com/shorts?v=dQw4w9WgXcQ",
+        "https://www.youtube.com/live?v=dQw4w9WgXcQ",
+        "https://www.youtube.com/embed/dQw4w9WgXcQ/extra",
+    ] {
+        assert_eq!(youtube_video_id(url), None, "expected reject for {url:?}");
+    }
+    // A trailing slash on a path-id route is still the same video.
+    assert_eq!(
+        youtube_video_id("https://www.youtube.com/embed/dQw4w9WgXcQ/").as_deref(),
+        Some("dQw4w9WgXcQ")
+    );
+}

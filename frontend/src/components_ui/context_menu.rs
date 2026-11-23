@@ -17,11 +17,16 @@ pub fn VideoContextMenu(
     on_close: Callback<()>,
 ) -> impl IntoView {
     let close = move |_| on_close.run(());
-    window_event_listener(ev::keydown, move |ev| {
+    // Registered on `window`, so it outlives this component unless removed: the
+    // handle is not detached on drop. `on_close` belongs to the room page, whose
+    // signals are disposed when client-side navigation leaves it, and a stale
+    // listener then panics on `get_untracked()`.
+    let escape_listener = window_event_listener(ev::keydown, move |ev| {
         if ev.key() == "Escape" {
             on_close.run(())
         }
     });
+    on_cleanup(move || escape_listener.remove());
 
     view! {
         <Show when=move || open.get()>

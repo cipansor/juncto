@@ -52,8 +52,8 @@ test.describe('Meeting Features', () => {
     // We look for a video card that contains text "Bob" and "✋"
     await expect(pageA.locator('.video-card', { hasText: 'Bob' }).locator('text=✋')).toBeVisible();
 
-    // Bob toggles it off
-    await pageB.click('button:has-text("Raise Hand")'); // Toggle off
+    // Bob toggles it off; the button relabels itself once the hand is up
+    await pageB.click('button:has-text("Lower Hand")');
     await expect(pageA.locator('li:has-text("Bob")')).not.toContainText('✋');
     await expect(pageA.locator('.video-card', { hasText: 'Bob' }).locator('text=✋')).not.toBeVisible();
 

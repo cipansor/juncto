@@ -50,6 +50,10 @@ pub fn Toolbox(
     on_feedback: Callback<()>,
     #[prop(optional)] on_embed: Option<Callback<()>>,
     on_raise_hand: Callback<()>,
+    /// Whether *this* participant's hand is up. The button used to be a fixed
+    /// "Raise Hand" label, so a raised hand looked like a click that did nothing.
+    #[prop(optional)]
+    is_hand_raised: Option<Signal<bool>>,
     on_screen_share: Callback<()>,
     on_share_video: Callback<()>,
     on_stop_share_video: Callback<()>,
@@ -183,11 +187,12 @@ pub fn Toolbox(
                         "Share Screen"
                     </button>
                     <button
+                        id="raise-hand-btn"
                         on:click=move |_| on_raise_hand.run(())
                         class="btn btn-warning"
-                        title="Raise Hand"
+                        title=move || if is_hand_raised.map(|h| h.get()).unwrap_or(false) { "Lower Hand" } else { "Raise Hand" }
                     >
-                        "Raise Hand"
+                        {move || if is_hand_raised.map(|h| h.get()).unwrap_or(false) { "Lower Hand" } else { "Raise Hand" }}
                     </button>
                 </Show>
                 <button

@@ -66,6 +66,10 @@ for how the gallery and the contrast audit work.
 |---|---|---|
 | ![Notifications](./tests/screenshots/13-notifications.png) | ![Speaker stats](./tests/screenshots/17-speaker-stats.png) | ![Whiteboard](./tests/screenshots/14-whiteboard.png) |
 
+| A long room name | A narrow header, chat open |
+|---|---|
+| ![A long room name in the header](./tests/screenshots/43-room-long-name.png) | ![The room name surviving a narrow header](./tests/screenshots/44-room-narrow-header.png) |
+
 | Breakout rooms | Reactions | Subtitles |
 |---|---|---|
 | ![Breakout rooms](./tests/screenshots/31-breakout-rooms.png) | ![Reactions](./tests/screenshots/28-reactions.png) | ![Subtitles](./tests/screenshots/29-subtitles.png) |
@@ -80,9 +84,13 @@ for how the gallery and the contrast audit work.
 |---|---|---|
 | ![Settings profile](./tests/screenshots/06-settings-profile.png) | ![Settings devices](./tests/screenshots/07-settings-devices.png) | ![Settings integrations](./tests/screenshots/08-settings-integrations.png) |
 
-| More | Branding | Virtual background |
+| Moderator | More | Branding |
 |---|---|---|
-| ![Settings more](./tests/screenshots/09-settings-more.png) | ![Settings branding](./tests/screenshots/10-settings-branding.png) | ![Virtual background](./tests/screenshots/15-virtual-background.png) |
+| ![Settings moderator](./tests/screenshots/42-settings-moderator.png) | ![Settings more](./tests/screenshots/09-settings-more.png) | ![Settings branding](./tests/screenshots/10-settings-branding.png) |
+
+| Virtual background |
+|---|
+| ![Virtual background](./tests/screenshots/15-virtual-background.png) |
 
 ### Collaboration and dialogs
 

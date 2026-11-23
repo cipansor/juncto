@@ -77,7 +77,7 @@ pub fn VideoGrid(
             && let Some(video_el) = video_ref.get()
         {
             video_el.set_src_object(Some(&stream));
-            let _ = video_el.play();
+            crate::utils::play_quietly(&video_el);
         }
     });
 
@@ -86,7 +86,7 @@ pub fn VideoGrid(
             && let Some(video_el) = screen_ref.get()
         {
             video_el.set_src_object(Some(&stream));
-            let _ = video_el.play();
+            crate::utils::play_quietly(&video_el);
         }
     });
 
@@ -406,6 +406,15 @@ fn render_local_user_tile(
                 }>
                     <span class="e2ee-lock" title="End-to-End Encrypted">"🔒"</span>
                 </Show>
+                <Show when=move || {
+                    my_id.get().map(|id| {
+                        participants.with(|ps| {
+                            ps.iter().find(|p| p.id == id).map(|p| p.is_hand_raised).unwrap_or(false)
+                        })
+                    }).unwrap_or(false)
+                }>
+                    <span title="Hand Raised">"✋"</span>
+                </Show>
                 <Show when=move || { my_audio_level.get() > 0.0 }>
                     <AudioLevelIndicator audio_level=my_audio_level />
                 </Show>
@@ -434,21 +443,12 @@ fn render_remote_item(
 ) -> AnyView {
     match item {
         GridItem::SharedVideo(url) => {
-            let video_id = if url.contains("youtube.com") || url.contains("youtu.be") {
-                if let Some(idx) = url.find("v=") {
-                    url[idx + 2..].split('&').next().unwrap_or("").to_string()
-                } else if let Some(idx) = url.rfind('/') {
-                    url[idx + 1..].split('?').next().unwrap_or("").to_string()
-                } else {
-                    "".to_string()
-                }
-            } else {
-                "".to_string()
-            };
-            let embed_url = if !video_id.is_empty() {
-                format!("https://www.youtube.com/embed/{}?autoplay=1", video_id)
-            } else {
-                "".to_string()
+            // Same parser the dialog validates with, so a URL that was accepted
+            // can never render as an empty embed.
+            let embed_url = match crate::components_ui::shared_video_dialog::youtube_video_id(&url)
+            {
+                Some(id) => format!("https://www.youtube.com/embed/{}?autoplay=1", id),
+                None => String::new(),
             };
             view! {
                 <div class="video-card shared-video">
@@ -600,7 +600,7 @@ fn render_remote_item(
                     && let Some(video_el) = remote_video_ref.get()
                 {
                     video_el.set_src_object(Some(&stream));
-                    let _ = video_el.play();
+                    crate::utils::play_quietly(&video_el);
                 }
             });
 

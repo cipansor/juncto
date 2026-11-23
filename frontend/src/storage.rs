@@ -11,6 +11,11 @@ pub struct UserSettings {
     pub resolution: Option<String>,
     #[serde(default)]
     pub recent_rooms: Vec<String>,
+    /// Stable per-browser identifier used to scope server-side rate limits
+    /// (feedback). Without it every client collapses into one "anonymous"
+    /// bucket and the fourth submission from anyone is rejected.
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 pub fn load_settings() -> UserSettings {
@@ -56,6 +61,39 @@ pub fn save_settings(settings: &UserSettings) {
     }
 }
 
+/// Returns this browser's stable identifier, generating and persisting one on
+/// first use.
+pub fn client_id() -> String {
+    if let Some(existing) = load_settings().client_id
+        && !existing.is_empty()
+    {
+        return existing;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let generated = "non-wasm-client".to_string();
+
+    #[cfg(target_arch = "wasm32")]
+    let generated = {
+        let crypto = web_sys::window().and_then(|w| w.crypto().ok());
+        match crypto {
+            Some(c) => {
+                let mut bytes = [0u8; 16];
+                if c.get_random_values_with_u8_array(&mut bytes).is_ok() {
+                    bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                } else {
+                    format!("{:?}", std::time::SystemTime::now())
+                }
+            }
+            None => format!("{:?}", std::time::SystemTime::now()),
+        }
+    };
+
+    let value = generated;
+    update_setting(|s| s.client_id = Some(value.clone()));
+    value
+}
+
 pub fn add_recent_room(room_id: String) {
     update_setting(move |s| {
         if let Some(pos) = s.recent_rooms.iter().position(|r| r == &room_id) {
@@ -89,12 +127,22 @@ mod tests {
             mic_id: None,
             resolution: Some("hd".to_string()),
             recent_rooms: vec!["room1".to_string()],
+            client_id: Some("cid".to_string()),
         };
         let json = serde_json::to_string(&settings).unwrap();
         let decoded: UserSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.display_name, settings.display_name);
         assert_eq!(decoded.camera_id, settings.camera_id);
         assert_eq!(decoded.recent_rooms, settings.recent_rooms);
+        assert_eq!(decoded.client_id, settings.client_id);
+    }
+
+    #[test]
+    fn legacy_settings_without_client_id_still_load() {
+        let json = r#"{"display_name":"Old","recent_rooms":["r1"]}"#;
+        let decoded: UserSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(decoded.client_id, None);
+        assert_eq!(decoded.recent_rooms, vec!["r1".to_string()]);
     }
 
     #[test]
