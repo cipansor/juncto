@@ -159,18 +159,35 @@ The shared helper (`contrast.ts`) samples the rendered pixels rather than recons
 backdrop from CSS, because a `background-color` walk cannot see what the browser composites:
 the landing page paints a radial gradient in `background-image` behind a translucent card
 with `backdrop-filter`, so a reconstructed colour would be the card over the body, not the
-card over the gradient users see. Three details make the sample honest:
+card over the gradient users see. Four details make the sample honest:
 
+* **Text hidden before sampling.** The screenshot is taken with
+  `-webkit-text-fill-color: transparent` on the audited subtree, so every pixel in a line
+  box is the surface behind the words. The earlier approach kept the glyphs and discarded
+  pixels that resembled the text colour, which cannot be made sound: a backdrop matching
+  the text colour *is* the unreadable case, so the filter deletes the evidence. White text
+  on a mostly-white line kept only the dark patch beside it and scored 21:1 while most of
+  the letters were invisible. `-webkit-text-fill-color` is used rather than `color:
+  transparent` because it leaves backgrounds, borders and shadows alone — a
+  `background: currentColor` would otherwise vanish and change the surface being measured.
 * **Per text run.** Colour is read per text node, not from the audited element. The audit
   target is often a container — `.chat-container` holds a white heading, a muted label and a
-  white-on-blue button — and comparing the container's colour with the button's backdrop
-  measures nothing real.
+  white-on-blue button — so the container's own colour (black, inherited) scored against the
+  dark card would report 1.44:1 for a container whose text is all legible.
 * **Per line box.** The sample is restricted to the text's own line boxes, so a short
   message in a wide paragraph is measured where the glyphs are, not where the box happens
   to be empty. A gradient crossing the text yields one surface per line and the worst line
   decides.
-* **Glyph pixels excluded.** Bold or large text can cover most of its own line box, which
-  would otherwise report the element as unreadable against its own colour.
+* **Every significant colour, worst wins.** Within a line, each colour covering at least a
+  tenth of the box is scored and the lowest ratio is reported. Taking only the commonest
+  colour would let a dark patch under a minority of the letters hide a light backdrop under
+  the rest.
+
+Only rows inside the screenshot are read. A line below the fold has no pixels to measure,
+and reading past the last row yields `undefined` channels and a `NaN` ratio — which passes
+every `toBeGreaterThanOrEqual` assertion, so an unmeasured line would silently count as
+readable. Offscreen lines are skipped, and an element with nothing visible to measure fails
+with `no visible text line to measure`.
 
 This exists because the React → Rust cutover left several dialogs with browser-default text
 on a white panel: legible in a diff, invisible on screen, and easy to miss even in a

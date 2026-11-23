@@ -29,7 +29,7 @@ export function contrastRatio(a: Rgb, b: Rgb): number {
 }
 
 /** Minimal PNG reader for the 8-bit RGB/RGBA screenshots Playwright produces. */
-function decodePng(buffer: Buffer): { width: number; pixels: Buffer; channels: number } {
+function decodePng(buffer: Buffer): { width: number; height: number; pixels: Buffer; channels: number } {
     let pos = 8;
     let width = 0;
     let height = 0;
@@ -80,7 +80,7 @@ function decodePng(buffer: Buffer): { width: number; pixels: Buffer; channels: n
             out[x] = value & 255;
         }
     }
-    return { width, pixels, channels };
+    return { width, height, pixels, channels };
 }
 
 type TextRun = { color: string; rects: { x: number; y: number; width: number; height: number }[] };
@@ -132,88 +132,107 @@ async function textRuns(page: Page, selector: string): Promise<TextRun[]> {
  * is one surface per line box: a gradient can make the first line and the last
  * line sit on different colours, and both have to pass.
  */
-export async function paintedBackdrops(
-    page: Page,
-    selector: string,
-    /** The text colour, whose pixels are glyphs and not backdrop. */
-    textColor?: Rgb,
-): Promise<Rgb[]> {
-    const box = await page.locator(selector).first().boundingBox();
-    expect(box, `no layout box for ${selector}`).not.toBeNull();
-    const runs = await textRuns(page, selector);
-    const rects = runs.flatMap((run) => run.rects);
+export async function paintedBackdrops(page: Page, selector: string): Promise<Rgb[]> {
+    expect(await page.locator(selector).first().boundingBox(), `no layout box for ${selector}`).not.toBeNull();
+    const rects = (await textRuns(page, selector)).flatMap((run) => run.rects);
     expect(rects.length, `no text line boxes for ${selector}`).toBeGreaterThan(0);
-    return backdropsForRects(page, rects, textColor);
+    const shot = await screenshotWithoutText(page, selector);
+    return rects
+        .map((rect) => dominantBackdrop(shot, rect))
+        .filter((rgb): rgb is Rgb => rgb !== null);
+}
+
+type Shot = { width: number; height: number; pixels: Buffer; channels: number };
+
+/**
+ * A screenshot of the element with its glyphs made transparent, so every pixel
+ * in a line box is the surface behind the words.
+ *
+ * The alternative — sampling the screenshot with the text still painted and
+ * discarding pixels that look like the text colour — cannot be made sound. A
+ * backdrop that matches the text colour is exactly the unreadable case, so the
+ * filter deletes the evidence: white text on a mostly-white line keeps only the
+ * dark patch beside it and scores 21:1 while most of the letters are invisible.
+ * Hiding the text removes the guess instead of tuning it.
+ */
+async function screenshotWithoutText(page: Page, selector: string): Promise<Shot> {
+    await page.evaluate((sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return;
+        el.setAttribute('data-contrast-probe', '');
+        if (document.getElementById('contrast-probe-style')) return;
+        const style = document.createElement('style');
+        style.id = 'contrast-probe-style';
+        // `-webkit-text-fill-color` leaves the background, borders and shadows
+        // alone, which `color: transparent` would not: a `background: currentColor`
+        // would vanish and change the very surface being measured.
+        style.textContent =
+            '[data-contrast-probe], [data-contrast-probe] * { -webkit-text-fill-color: transparent !important; }';
+        document.head.appendChild(style);
+    }, selector);
+    try {
+        return decodePng(await page.screenshot());
+    } finally {
+        await page.evaluate((sel) => {
+            document.querySelector(sel)?.removeAttribute('data-contrast-probe');
+        }, selector);
+    }
 }
 
 /**
- * The surface painted behind each of the given boxes, one per box.
+ * Every backdrop colour under a line box, with how much of the box it covers.
  *
- * Sampling an element's whole box is not enough: a short message in a wide
- * paragraph leaves most of the strip empty, and over a gradient the commonest
- * colour in that strip need not be the colour behind the words. Each line box
- * is sampled on its own so a gradient crossing the text is measured everywhere
- * it is painted, not just where it happens to be most common.
+ * Only the visible part of the box is read: a line below the fold is not on the
+ * screenshot, and reading past the last row yields `undefined` channel values,
+ * which turn into a `NaN` ratio rather than a measurement.
  */
-async function backdropsForRects(
-    page: Page,
-    rects: { x: number; y: number; width: number; height: number }[],
-    textColor?: Rgb,
-): Promise<Rgb[]> {
-    const { width, pixels, channels } = decodePng(await page.screenshot());
+function backdropsForRect(shot: Shot, rect: { x: number; y: number; width: number; height: number }) {
+    const { width, height, pixels, channels } = shot;
+    // The vertical middle of a line box passes through the glyphs; the padding
+    // above and below the text does not.
+    const y0 = Math.max(0, Math.floor(rect.y + rect.height * 0.3));
+    const y1 = Math.min(Math.floor(rect.y + rect.height * 0.7), Math.floor(rect.y + rect.height), height - 1);
+    const x0 = Math.max(0, Math.floor(rect.x));
+    const x1 = Math.min(Math.floor(rect.x + rect.width), width - 1);
+    if (x1 < x0 || y1 < y0) return [];
 
-    const surfaces: Rgb[] = [];
-    for (const rect of rects) {
-        // The vertical middle of a line box passes through the glyphs; the
-        // padding above and below the text does not.
-        const y0 = Math.max(0, Math.floor(rect.y + rect.height * 0.3));
-        const y1 = Math.min(Math.floor(rect.y + rect.height * 0.7), rect.y + rect.height);
-        const x0 = Math.max(0, Math.floor(rect.x));
-        const x1 = Math.min(width - 1, Math.floor(rect.x + rect.width));
-        if (x1 <= x0 || y1 <= y0) continue;
-
-        // Glyph pixels are not backdrop. Bold or large text can cover most of
-        // its own line box, and then the commonest colour is the text itself,
-        // which would report the element as unreadable against its own colour.
-        // Skip anything close to the text colour; keep a fallback for text that
-        // genuinely sits on a background of the same colour, where every pixel
-        // is a glyph pixel and the honest answer is that nothing is readable.
-        const isGlyph = (rgb: Rgb) =>
-            textColor !== undefined &&
-            Math.abs(rgb[0] - textColor[0]) +
-                Math.abs(rgb[1] - textColor[1]) +
-                Math.abs(rgb[2] - textColor[2]) <
-                90;
-
-        const collect = (skipGlyphs: boolean) => {
-            const counts = new Map<string, { count: number; rgb: Rgb }>();
-            for (let y = y0; y <= y1; y += 1) {
-                for (let x = x0; x <= x1; x += 1) {
-                    const o = (y * width + x) * channels;
-                    const rgb: Rgb = [pixels[o], pixels[o + 1], pixels[o + 2]];
-                    if (skipGlyphs && isGlyph(rgb)) continue;
-                    const key = rgb.join(',');
-                    const entry = counts.get(key);
-                    if (entry) entry.count += 1;
-                    else counts.set(key, { count: 1, rgb });
-                }
-            }
-            return [...counts.values()].sort((a, b) => b.count - a.count);
-        };
-
-        const backdrop = collect(true);
-        const ranked = backdrop.length > 0 ? backdrop : collect(false);
-        if (ranked.length === 0) continue;
-        surfaces.push(ranked[0].rgb);
+    const counts = new Map<string, { count: number; rgb: Rgb }>();
+    let total = 0;
+    for (let y = y0; y <= y1; y += 1) {
+        for (let x = x0; x <= x1; x += 1) {
+            const o = (y * width + x) * channels;
+            const rgb: Rgb = [pixels[o], pixels[o + 1], pixels[o + 2]];
+            const key = rgb.join(',');
+            const entry = counts.get(key);
+            if (entry) entry.count += 1;
+            else counts.set(key, { count: 1, rgb });
+            total += 1;
+        }
     }
-    expect(surfaces.length, `no sampleable line box`).toBeGreaterThan(0);
-    return surfaces;
+    return [...counts.values()]
+        .map((entry) => ({ rgb: entry.rgb, share: entry.count / total }))
+        .sort((a, b) => b.share - a.share);
 }
+
+/** The colour behind most of the letters on this line, or null if it is offscreen. */
+function dominantBackdrop(shot: Shot, rect: { x: number; y: number; width: number; height: number }): Rgb | null {
+    return backdropsForRect(shot, rect)[0]?.rgb ?? null;
+}
+
+/** Share of a line box a colour must cover before it can hide the text there. */
+const SIGNIFICANT_SHARE = 0.1;
 
 /**
  * Assert every run of text inside the element clears the WCAG AA contrast floor
  * against the surface actually painted behind it. The worst run decides: one
  * unreadable line fails the element.
+ *
+ * Colour is read per run, so a container holding a white heading, a muted label
+ * and a dark-on-light button is measured three times with the colour each is
+ * painted in. Within a line, every colour covering at least a tenth of the box
+ * is scored and the worst wins: a line that is mostly white with a dark patch
+ * is unreadable for the letters over the white, even though the patch alone
+ * would score well.
  */
 export async function expectReadableText(
     page: Page,
@@ -224,18 +243,32 @@ export async function expectReadableText(
     const runs = await textRuns(page, selector);
     expect(runs.length, `no text inside ${label}`).toBeGreaterThan(0);
 
+    const shot = await screenshotWithoutText(page, selector);
+
     let worst: { ratio: number; color: string; bg: Rgb } | null = null;
+    let measured = 0;
     for (const run of runs) {
         const fg = parseColor(run.color);
         if (!fg) continue;
         const rgb: Rgb = [fg[0], fg[1], fg[2]];
-        for (const bg of await backdropsForRects(page, run.rects, rgb)) {
-            const ratio = contrastRatio(rgb, bg);
-            if (worst === null || ratio < worst.ratio) {
-                worst = { ratio, color: run.color, bg };
+        for (const rect of run.rects) {
+            const backdrops = backdropsForRect(shot, rect);
+            if (backdrops.length === 0) continue; // Offscreen: nothing to measure.
+            measured += 1;
+            const scoring = backdrops.filter((b) => b.share >= SIGNIFICANT_SHARE);
+            for (const bg of scoring.length > 0 ? scoring : backdrops.slice(0, 1)) {
+                const ratio = contrastRatio(rgb, bg.rgb);
+                expect(Number.isFinite(ratio), `${label}: non-finite contrast`).toBe(true);
+                if (worst === null || ratio < worst.ratio) {
+                    worst = { ratio, color: run.color, bg: bg.rgb };
+                }
             }
         }
     }
+    expect(
+        measured,
+        `${label}: no visible text line to measure (is it below the fold or clipped?)`,
+    ).toBeGreaterThan(0);
     expect(worst, `no measurable text inside ${label}`).not.toBeNull();
     expect(
         worst!.ratio,

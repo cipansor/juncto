@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { paintedBackdrops, contrastRatio } from './contrast';
+import { paintedBackdrops, contrastRatio, expectReadableText } from './contrast';
 
 /**
  * The contrast helper has to sample the surface behind the words, not the whole
@@ -38,23 +38,70 @@ test.describe('contrast helper sampling', () => {
         expect(Math.max(...luminances) - Math.min(...luminances)).toBeGreaterThan(200);
     });
 
-    test('measures each text run against its own colour in a mixed container', async ({ page }) => {
-        // A container whose children paint different colours: a white heading on
-        // the dark card, and white text on a blue button. Reading the colour from
-        // the container would compare the heading's white with the button's blue
-        // backdrop and report a contrast failure that no user can see.
+    test('audits a container with each run own colour, not one colour for all', async ({ page }) => {
+        // A container whose children paint different colours: a light heading on
+        // the dark card, and white text on a blue button. Every child is legible.
+        // Reading one colour from the container and applying it to both children
+        // is what this guards: the container's inherited colour (black) scored
+        // against the dark card is 1.44:1, a failure no user can see.
         await page.setContent(`
             <div id="box" style="background:#1e293b;padding:16px;width:320px">
               <h3 style="margin:0;color:#f8fafc;font:16px sans-serif">Heading</h3>
-              <button id="btn" style="margin-top:12px;padding:8px 16px;border:0;border-radius:6px;background:#3b82f6;color:#ffffff;font:14px sans-serif">Send</button>
+              <button id="btn" style="margin-top:12px;padding:8px 16px;border:0;border-radius:6px;background:#1d4ed8;color:#ffffff;font:14px sans-serif">Send</button>
             </div>
         `);
-        const heading = await paintedBackdrops(page, '#box h3', [248, 250, 252]);
-        const button = await paintedBackdrops(page, '#box #btn', [255, 255, 255]);
-        // The heading sits on the dark card, the button label on its own blue.
-        expect(contrastRatio([248, 250, 252], heading[0])).toBeGreaterThan(10);
-        expect(button[0][2], `button backdrop ${button[0]}`).toBeGreaterThan(150);
-        expect(contrastRatio([255, 255, 255], button[0])).toBeGreaterThanOrEqual(3);
+        const ratio = await expectReadableText(page, '#box', 'mixed container', 4.5);
+        // Both children pass, and the worst of them is the button (6.70:1).
+        expect(ratio).toBeGreaterThanOrEqual(4.5);
+        expect(ratio).toBeLessThan(8);
+    });
+
+    test('a container fails when one child is unreadable', async ({ page }) => {
+        // Same shape, but the button text is dark blue on blue: 1.4:1. The
+        // heading alone would pass, so auditing the container has to surface the
+        // child that does not. Reusing the heading's colour here would pass.
+        await page.setContent(`
+            <div id="box" style="background:#1e293b;padding:16px;width:320px">
+              <h3 style="margin:0;color:#f8fafc;font:16px sans-serif">Heading</h3>
+              <button id="btn" style="margin-top:12px;padding:8px 16px;border:0;border-radius:6px;background:#1d4ed8;color:#1e3a8a;font:14px sans-serif">Send</button>
+            </div>
+        `);
+        await expect(expectReadableText(page, '#box', 'mixed container', 4.5)).rejects.toThrow(
+            /contrast .* is below 4\.5/,
+        );
+    });
+
+    test('a backdrop that matches the text colour is not mistaken for glyphs', async ({ page }) => {
+        // The line is 70% white with a dark patch on the left; the text is white,
+        // so most of the letters are invisible. Sampling the painted text and
+        // discarding pixels that look like the text colour would delete the white
+        // backdrop, keep only the dark patch, and score 21:1. The honest answer
+        // is 1:1 for the letters that disappear.
+        await page.setContent(`
+            <div style="position:relative;width:400px;height:40px;background:#ffffff">
+              <div style="position:absolute;left:0;top:0;width:120px;height:40px;background:#000000"></div>
+              <p id="t" style="position:relative;margin:0;font:20px/40px sans-serif;color:#ffffff">invisible words</p>
+            </div>
+        `);
+        await expect(expectReadableText(page, '#t', 'white on white', 3)).rejects.toThrow(
+            /contrast 1\.00 .* is below 3/,
+        );
+    });
+
+    test('a line below the fold is skipped instead of producing a NaN score', async ({ page }) => {
+        // The line box is off the screenshot. Reading rows the PNG does not have
+        // yields undefined channel values, and a NaN ratio passes every
+        // `toBeGreaterThanOrEqual` check, so an unmeasured line would silently
+        // count as readable.
+        await page.setViewportSize({ width: 800, height: 300 });
+        await page.setContent(`
+            <div style="height:2000px"></div>
+            <p id="off" style="color:#ffffff;background:#000000;font:16px sans-serif">below the fold</p>
+        `);
+        expect(await paintedBackdrops(page, '#off')).toEqual([]);
+        await expect(expectReadableText(page, '#off', 'offscreen', 3)).rejects.toThrow(
+            /no visible text line to measure/,
+        );
     });
 
     test('a readable element passes and an unreadable one fails', async ({ page }) => {
