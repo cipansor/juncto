@@ -18,4 +18,10 @@ test_output.txt
 playwright_output.txt
 backend_log.txt
 *.log
+# Written by stats_and_background.spec.ts on every run.
+tests/e2e/verification.png
+
+# Local-only Playwright config and agent state
+tests/e2e/pw.local.config.ts
+.openhands/
 *.patch

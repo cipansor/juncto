@@ -1,6 +1,11 @@
 use crate::i18n::t;
 use leptos::prelude::*;
 
+/// Thin re-export so the grid and dialog cannot drift from the server.
+pub(crate) fn youtube_video_id(url: &str) -> Option<String> {
+    shared::youtube_video_id(url)
+}
+
 #[component]
 pub fn SharedVideoDialog(
     show: ReadSignal<bool>,
@@ -8,6 +13,7 @@ pub fn SharedVideoDialog(
     on_submit: Callback<String>,
 ) -> impl IntoView {
     let (url, set_url) = signal("".to_string());
+    let (invalid, set_error) = signal(false);
 
     view! {
         <Show when=move || show.get()>
@@ -23,10 +29,18 @@ pub fn SharedVideoDialog(
                         <input
                             type="text"
                             prop:value=url
-                            on:input=move |ev| set_url.set(event_target_value(&ev))
+                            on:input=move |ev| {
+                                set_url.set(event_target_value(&ev));
+                                set_error.set(false);
+                            }
                             placeholder="https://www.youtube.com/watch?v=..."
                             style="width: 100%;"
                         />
+                        <Show when=move || invalid.get()>
+                            <p id="shared-video-error" class="form-error">
+                                "Enter a valid YouTube link, e.g. https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+                            </p>
+                        </Show>
                     </div>
 
                     <div style="display: flex; justify-content: flex-end; gap: 10px;">
@@ -40,7 +54,13 @@ pub fn SharedVideoDialog(
                             id="submit-shared-video-btn"
                             class="btn btn-primary"
                             on:click=move |_| {
-                                on_submit.run(url.get());
+                                let value = url.get();
+                                if youtube_video_id(&value).is_none() {
+                                    set_error.set(true);
+                                    return;
+                                }
+                                set_error.set(false);
+                                on_submit.run(value);
                                 on_close.run(());
                                 set_url.set("".to_string());
                             }
@@ -62,5 +82,50 @@ mod tests {
     fn test_shared_video_dialog_compiles() {
         // Minimal test to ensure the component definition is valid Rust
         let _ = SharedVideoDialog;
+    }
+
+    #[test]
+    fn extracts_ids_from_the_supported_youtube_url_shapes() {
+        assert_eq!(
+            youtube_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ").as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+        assert_eq!(
+            youtube_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s").as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+        assert_eq!(
+            youtube_video_id("https://youtu.be/dQw4w9WgXcQ?si=abc").as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+        assert_eq!(
+            youtube_video_id("https://www.youtube.com/embed/dQw4w9WgXcQ").as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+        assert_eq!(
+            youtube_video_id("https://www.youtube.com/shorts/dQw4w9WgXcQ").as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+    }
+
+    #[test]
+    fn rejects_urls_that_would_render_a_blank_tile() {
+        for bad in [
+            "",
+            "   ",
+            "not a url at all",
+            "javascript:alert(1)",
+            "https://example.com/watch?v=dQw4w9WgXcQ",
+            "https://www.youtube.com/watch",
+            "https://www.youtube.com/watch?v=",
+            "https://youtu.be/",
+            "https:/www.youtube.com/watch?v=dQw4w9WgXcQ",
+        ] {
+            assert_eq!(
+                youtube_video_id(bad),
+                None,
+                "expected rejection for {bad:?}"
+            );
+        }
     }
 }
