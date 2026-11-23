@@ -338,42 +338,62 @@ test.describe('Dialog contrast audit', () => {
             // the badge is not the surface the badge is painted on.
             await expect(visitor.locator('.toast')).toHaveCount(0, { timeout: 15000 });
 
-            const measured = await visitor.evaluate(() => {
-                const bell = document.querySelector('#notif-bell-btn') as HTMLElement;
-                const count = document.querySelector('#notif-bell-btn .notif-badge') as HTMLElement;
-                const badge = document.querySelector(
-                    '.room-header .badge-success, .room-header .badge-danger',
-                ) as HTMLElement;
-                if (!bell || !count || !badge) return null;
-                const lock = badge.getBoundingClientRect();
-                const button = bell.getBoundingClientRect();
-                // The count is positioned outside the button, so the button's
-                // own rect says nothing about where the count lands: it hangs
-                // 6px past the right edge and grows leftwards with each digit.
-                // What has to clear the lock badge is everything the control
-                // draws, so take the union of the two rects first — measuring
-                // each separately against the badge would report the gap
-                // between them as clearance.
-                const drawn = count.getBoundingClientRect();
-                const left = Math.min(button.left, drawn.left);
-                const right = Math.max(button.right, drawn.right);
-                return {
-                    clearance: Math.round(Math.min(lock.right, right) - Math.max(lock.left, left)),
-                    countLeftOfButton: Math.round(button.left - drawn.left),
-                };
-            });
+            // The count is drawn outside the button, so the button's own rect
+            // says nothing about where the count lands: it hangs 6px past the
+            // right edge and grows leftwards with each digit. Measure everything
+            // the control draws — the union of button and count — against the
+            // lock badge, and how much of the reserved corner the count spans.
+            const measure = () =>
+                visitor.evaluate(() => {
+                    const bell = document.querySelector('#notif-bell-btn') as HTMLElement;
+                    const count = document.querySelector('#notif-bell-btn .notif-badge') as HTMLElement;
+                    const badge = document.querySelector(
+                        '.room-header .badge-success, .room-header .badge-danger',
+                    ) as HTMLElement;
+                    if (!bell || !count || !badge) return null;
+                    const lock = badge.getBoundingClientRect();
+                    const button = bell.getBoundingClientRect();
+                    const drawn = count.getBoundingClientRect();
+                    return {
+                        clearance: Math.round(
+                            Math.min(lock.right, Math.max(button.right, drawn.right)) -
+                                Math.max(lock.left, Math.min(button.left, drawn.left)),
+                        ),
+                        countSpan: Math.round(button.right - drawn.left),
+                    };
+                });
+
+            const measured = await measure();
             expect(measured, `header badges, bell and count must exist at ${width}px`).not.toBeNull();
             expect(
                 measured!.clearance,
                 `the bell and its count must not reach the badge at ${width}px`,
             ).toBeLessThanOrEqual(0);
-            // The count must stay within the corner the header reserves for the
-            // bell. A count that grows leftwards is the failure this catches:
-            // the button keeps its 30px, so only the count's own rect shows it.
+
+            // The boundary is the corner the header reserves for the bell, not
+            // the button's own width: the bell is 30px here but the corner is
+            // 52px on mobile (64px padding less the 12px offset) and 84px on
+            // desktop. A count wider than the bell is fine while it stays inside.
+            const reservedCorner = width <= 768 ? 52 : 84;
             expect(
-                measured!.countLeftOfButton,
-                `the count must not grow past the bell at ${width}px`,
-            ).toBeLessThanOrEqual(6);
+                measured!.countSpan,
+                `the count must fit the ${reservedCorner}px corner reserved for the bell at ${width}px`,
+            ).toBeLessThanOrEqual(reservedCorner);
+
+            // So a 44px count — three digits — has to be accepted: it hangs 6px
+            // past the bell and reaches 38px back, inside the 52px corner and
+            // clear of the lock badge. Bounding it against the bell instead
+            // would reject a layout that touches nothing.
+            if (width === 768) {
+                await visitor.addStyleTag({
+                    content: '#notif-bell-btn .notif-badge { min-width: 44px !important; }',
+                });
+                await visitor.waitForTimeout(200);
+                const wide = await measure();
+                expect(wide, 'a widened count must still be measurable').not.toBeNull();
+                expect(wide!.countSpan, 'a 44px count must fit the 52px corner').toBeLessThanOrEqual(52);
+                expect(wide!.clearance, 'a 44px count must clear the lock badge').toBeLessThanOrEqual(0);
+            }
 
             // The count is white on a red fill, so it needs its own floor: the
             // red that reads as "alert" (`--danger-color`) only reaches 3.6:1
