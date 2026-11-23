@@ -288,6 +288,76 @@ test.describe('Dialog contrast audit', () => {
         }
     });
 
+    test('the bell clears the badges with an unread count showing', async ({ page, context }) => {
+        // The two checks above force the bell to a width, so neither sees what
+        // the button does on its own. It renders its unread count as a child,
+        // and in flow that child widened the button: 30px bare, 50px with one
+        // digit, 56px with two. The mobile rule reserves 12px offset plus a
+        // bell up to 52px, so a two-digit count reached 4px into the lock
+        // badge. The count is pinned to the corner now, so the button keeps its
+        // width however large the count gets — which is what this measures, at
+        // the width the user actually gets.
+        for (const width of [1440, 768, 600, 390]) {
+            await page.setViewportSize({ width, height: 800 });
+            const room = `BellCount_${width}_${Date.now()}`;
+            await page.goto(`/room/${room}`);
+            await page.fill('#display-name', 'Host');
+            await page.click('.join-btn');
+            await expect(page.locator('.video-grid')).toBeVisible({ timeout: 20000 });
+
+            const visitor = await context.newPage();
+            await visitor.setViewportSize({ width, height: 800 });
+            await visitor.goto(`/room/${room}`);
+            await visitor.fill('#display-name', 'Visitor');
+            await visitor.click('.join-btn');
+            await expect(visitor.locator('.video-grid')).toBeVisible({ timeout: 20000 });
+
+            // Muting everyone raises a toast for the visitor, and each toast is
+            // one unread. Twelve of them put two digits in the badge, the width
+            // that overflowed. This is the product's own path to a count, not a
+            // dispatch a test made up.
+            if (await page.locator('#mute-all-btn').isHidden()) {
+                await page.click('#toggle-participants-btn');
+            }
+            for (let i = 0; i < 12; i += 1) {
+                await page.click('#mute-all-btn');
+                await page.waitForTimeout(150);
+            }
+            // Two digits is the condition that broke; the exact number also
+            // depends on how many toasts the room raised on join.
+            await expect(visitor.locator('#notif-bell-btn .notif-badge')).toHaveText(/^\d{2}$/);
+
+            // The toasts the count comes from stack over this corner for three
+            // seconds, so wait them out before measuring: a toast in front of
+            // the badge is not the surface the badge is painted on.
+            await expect(visitor.locator('.toast')).toHaveCount(0, { timeout: 15000 });
+
+            const measured = await visitor.evaluate(() => {
+                const bell = document.querySelector('#notif-bell-btn') as HTMLElement;
+                const badge = document.querySelector(
+                    '.room-header .badge-success, .room-header .badge-danger',
+                ) as HTMLElement;
+                if (!bell || !badge) return null;
+                const b = badge.getBoundingClientRect();
+                const c = bell.getBoundingClientRect();
+                return {
+                    clearance: Math.round(Math.min(b.right, c.right) - Math.max(b.left, c.left)),
+                };
+            });
+            expect(measured, `header badges and bell must exist at ${width}px`).not.toBeNull();
+            expect(
+                measured!.clearance,
+                `the bell with a two-digit count must not reach the badge at ${width}px`,
+            ).toBeLessThanOrEqual(0);
+
+            // The count is white on a red fill, so it needs its own floor: the
+            // red that reads as "alert" (`--danger-color`) only reaches 3.6:1
+            // behind white, and this is small text.
+            await expectReadableText(visitor, '#notif-bell-btn .notif-badge', `unread count at ${width}px`);
+            await visitor.close();
+        }
+    });
+
     test('the room name stays readable when the bar is narrow', async ({ page, request }) => {
         // Chat is open by default above 768px and takes 340px, so a 780px
         // window leaves a 440px header. The single-line title used to spend all
