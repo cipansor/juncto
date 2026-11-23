@@ -323,6 +323,12 @@ test.describe('Setting a password after locking (Step 5)', () => {
             // draft compared equal to nothing and Apply stayed dead while the
             // server still admitted guests with meeting42.
             await expect(hostPage.locator('#apply-password-btn')).toBeEnabled();
+            // Clearing the field removes the password and leaves the room
+            // locked with nobody able to join. The prompt must say so instead
+            // of calling it an ordinary save.
+            await expect(hostPage.locator('#password-unsaved')).toHaveText(
+                'Press Apply Password to remove the room password.',
+            );
             await hostPage.click('#apply-password-btn');
             await hostPage.click('#close-settings-btn');
 
@@ -467,4 +473,119 @@ test.describe('Setting a password after locking (Step 5)', () => {
             await guestCtx.close();
         }
     });
+});
+
+test('a password replaced by another host can be restored after a handoff back', async ({
+    browser,
+    request,
+}) => {
+    const roomResp = await request.post('http://localhost:3000/api/rooms', {
+        data: {
+            room_name: 'HandoffPwd',
+            is_locked: false,
+            is_recording: false,
+            is_lobby_enabled: false,
+            max_participants: 10,
+        },
+    });
+    const roomName = (await roomResp.json()).config.room_name;
+    const roomUrl = `/room/${encodeURIComponent(roomName)}`;
+
+    const aliceCtx = await browser.newContext();
+    const bobCtx = await browser.newContext();
+    const guestCtx = await browser.newContext();
+
+    const openModeratorTab = async (page: import('@playwright/test').Page) => {
+        await page.click('#settings-btn');
+        await page.click('button:has-text("Moderator")');
+    };
+
+    const transferHostTo = async (
+        page: import('@playwright/test').Page,
+        name: string,
+    ) => {
+        if (
+            (await page.locator('#participants-panel').getAttribute('class'))?.includes(
+                'panel-hidden',
+            )
+        ) {
+            await page.click('#toggle-participants-btn');
+        }
+        const row = page.locator('.participant-item').filter({ hasText: name });
+        await row.locator('button[title="Transfer Host"]').click();
+    };
+
+    try {
+        // Alice hosts and locks the room with a password.
+        const alicePage = await aliceCtx.newPage();
+        await alicePage.goto(roomUrl);
+        await alicePage.fill('.prejoin-container input[type="text"]', 'Alice');
+        await alicePage.click('button.join-btn');
+        await expect(alicePage.locator('.room-container')).toBeVisible();
+
+        await openModeratorTab(alicePage);
+        await alicePage.fill('#lock-password-input', 'planning42');
+        await alicePage.click('#lock-room-toggle');
+        await expect(
+            alicePage.locator('.settings-hint').filter({
+                hasText: 'Guests need this password to join',
+            }),
+        ).toBeVisible({ timeout: 10000 });
+        await alicePage.click('#close-settings-btn');
+
+        // Bob joins with the password.
+        const bobPage = await bobCtx.newPage();
+        await bobPage.goto(roomUrl);
+        await bobPage.fill('.prejoin-container input[type="text"]', 'Bob');
+        await bobPage.click('button.join-btn');
+        await expect(bobPage.locator('#room-password')).toBeVisible({ timeout: 10000 });
+        await bobPage.fill('#room-password', 'planning42');
+        await bobPage.click('button.join-btn');
+        await expect(bobPage.locator('.room-container')).toBeVisible({ timeout: 10000 });
+        await expect(alicePage.locator('.participant-item')).toHaveCount(2, {
+            timeout: 10000,
+        });
+
+        // Hand control to Bob. The room stays locked and stays password-protected.
+        await transferHostTo(alicePage, 'Bob');
+        await expect(
+            alicePage.locator('.settings-hint').filter({ hasText: 'Guests need this password' }),
+        ).toHaveCount(0);
+
+        // Bob replaces the password without unlocking.
+        await openModeratorTab(bobPage);
+        await bobPage.fill('#lock-password-input', 'planning43');
+        await expect(bobPage.locator('#apply-password-btn')).toBeEnabled();
+        await bobPage.click('#apply-password-btn');
+        await bobPage.click('#close-settings-btn');
+
+        // Hand control back to Alice.
+        await transferHostTo(bobPage, 'Alice');
+
+        // Regression: Alice's cached baseline still held planning42, so typing
+        // it back compared equal and Apply stayed disabled — the room kept
+        // rejecting guests with a password the host could not change.
+        await openModeratorTab(alicePage);
+        await expect(alicePage.locator('#lock-password-input')).toBeVisible({
+            timeout: 10000,
+        });
+        await alicePage.fill('#lock-password-input', 'planning42');
+        await expect(alicePage.locator('#apply-password-btn')).toBeEnabled({ timeout: 10000 });
+        await alicePage.click('#apply-password-btn');
+        await alicePage.click('#close-settings-btn');
+
+        // The restored password is the one that now admits a guest.
+        const guestPage = await guestCtx.newPage();
+        await guestPage.goto(roomUrl);
+        await guestPage.fill('.prejoin-container input[type="text"]', 'Guest');
+        await guestPage.click('button.join-btn');
+        await expect(guestPage.locator('#room-password')).toBeVisible({ timeout: 10000 });
+        await guestPage.fill('#room-password', 'planning42');
+        await guestPage.click('button.join-btn');
+        await expect(guestPage.locator('.room-container')).toBeVisible({ timeout: 10000 });
+    } finally {
+        await aliceCtx.close();
+        await bobCtx.close();
+        await guestCtx.close();
+    }
 });

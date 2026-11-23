@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { expectReadableText } from './contrast';
 
 test.describe('Prejoin Screen', () => {
   test.beforeEach(async ({ page, request }) => {
@@ -96,6 +97,7 @@ test.describe('Home form validation', () => {
         await expect(error).not.toHaveAttribute('style', /color/);
         // Regression: `.hero-card p` is more specific than `.form-error` alone,
         // so the message rendered in the muted body colour, not the danger one.
-        await expect(error).toHaveCSS('color', 'rgb(239, 68, 68)');
+        await expect(error).toHaveCSS('color', 'rgb(252, 165, 165)');
+        await expectReadableText(page, '.hero-card .form-error', 'landing page form error');
     });
 });

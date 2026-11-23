@@ -82,7 +82,7 @@ for how the gallery and the contrast audit work.
 
 | Moderator | More | Branding |
 |---|---|---|
-| ![Settings moderator](./tests/screenshots/35-settings-moderator.png) | ![Settings more](./tests/screenshots/09-settings-more.png) | ![Settings branding](./tests/screenshots/10-settings-branding.png) |
+| ![Settings moderator](./tests/screenshots/42-settings-moderator.png) | ![Settings more](./tests/screenshots/09-settings-more.png) | ![Settings branding](./tests/screenshots/10-settings-branding.png) |
 
 | Virtual background |
 |---|

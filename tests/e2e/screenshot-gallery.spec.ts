@@ -1,9 +1,47 @@
 import { test, expect, Page, APIRequestContext } from '@playwright/test';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const OUT = process.env.SCREENSHOT_DIR || '../screenshots';
+const OUT_DIR = path.resolve(__dirname, OUT);
+
+/**
+ * The gallery is ordered by the numeric prefix of each file name, so a repeated
+ * prefix makes the order ambiguous and two views collide in the README tables.
+ * Two screens were once both numbered 35; fail instead of silently overwriting.
+ */
+function expectUniqueScreenshotNumbers(dir: string) {
+    const files = fs.readdirSync(dir).filter((f) => /^\d+-.*\.png$/.test(f));
+    const seen = new Map<string, string[]>();
+    for (const file of files) {
+        const number = file.split('-')[0];
+        seen.set(number, [...(seen.get(number) ?? []), file]);
+    }
+    const duplicates = [...seen.entries()].filter(([, names]) => names.length > 1);
+    expect(
+        duplicates,
+        `screenshot numbers must be unique: ${duplicates
+            .map(([n, names]) => `${n} used by ${names.join(', ')}`)
+            .join('; ')}`,
+    ).toEqual([]);
+}
 
 const DESKTOP = { width: 1440, height: 900 };
 const MOBILE = { width: 420, height: 860 };
+
+/**
+ * A control that only exists on one settings tab. `active` on the tab button
+ * proves the click registered; this proves the right panel actually rendered,
+ * so a capture cannot be filed under a tab whose content never appeared.
+ * Devices and Integrations render no ids, hence the text markers.
+ */
+const PANEL_MARKER: Record<string, string> = {
+    Devices: 'text=Camera',
+    Integrations: 'text=Salesforce',
+    Moderator: '#lock-room-toggle',
+    More: '#audio-only-toggle',
+    Branding: '#branding-primary-color',
+};
 
 async function resetRoom(request: APIRequestContext, overrides: Record<string, unknown> = {}) {
     const response = await request.post('/api/rooms', {
@@ -46,6 +84,8 @@ async function showPanel(page: Page, toggleId: string, panelSelector: string) {
 test.describe('UI screenshot gallery', () => {
     test('capture every frontend view', async ({ page, context, request }) => {
         test.setTimeout(420_000);
+        fs.mkdirSync(OUT_DIR, { recursive: true });
+        expectUniqueScreenshotNumbers(OUT_DIR);
         await resetRoom(request);
         await page.setViewportSize(DESKTOP);
 
@@ -99,7 +139,7 @@ test.describe('UI screenshot gallery', () => {
         for (const [tab, shot] of [
             ['Devices', '07-settings-devices'],
             ['Integrations', '08-settings-integrations'],
-            ['Moderator', '35-settings-moderator'],
+            ['Moderator', '42-settings-moderator'],
             ['More', '09-settings-more'],
             ['Branding', '10-settings-branding'],
         ] as const) {
@@ -108,6 +148,7 @@ test.describe('UI screenshot gallery', () => {
             // The click only marks the tab active once its panel has rendered;
             // without this wait a capture could be filed under the wrong name.
             await expect(tabButton).toHaveClass(/active/);
+            await expect(page.locator(PANEL_MARKER[tab]).first()).toBeVisible();
             await page.waitForTimeout(600);
             await page.screenshot({ path: `${OUT}/${shot}.png` });
         }

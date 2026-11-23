@@ -119,7 +119,7 @@ PNG per screen to `tests/screenshots/`. It is the source of every image in the R
 cd tests/e2e && npx playwright test screenshot-gallery.spec.ts
 ```
 
-The file names are ordered and stable (`01-home.png` … `41-mobile-settings.png`). If you
+The file names are ordered and stable (`01-home.png` … `42-settings-moderator.png`). If you
 add a screen, append the next number; if you renumber, update the README tables in the same
 commit. Screens that depend on timing (the lobby, the reconnect overlay) are captured
 behind an explicit visibility check and are skipped with an annotation rather than failing

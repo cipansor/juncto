@@ -1,4 +1,5 @@
 import { test, expect, Page, APIRequestContext } from '@playwright/test';
+import { expectReadableText } from './contrast';
 
 /**
  * Contrast audit for every dialog and the main room surface.
@@ -11,81 +12,12 @@ import { test, expect, Page, APIRequestContext } from '@playwright/test';
 
 const DESKTOP = { width: 1440, height: 900 };
 
-/** Parse an `rgb()`/`rgba()` string into a luminance-computable tuple. */
-function parseColor(value: string): [number, number, number, number] | null {
-    const m = value.match(/rgba?\(([^)]+)\)/);
-    if (!m) return null;
-    const parts = m[1].split(',').map((p) => parseFloat(p.trim()));
-    const [r, g, b, a] = [parts[0], parts[1], parts[2], parts[3] ?? 1];
-    return [r, g, b, a];
-}
-
-function relativeLuminance([r, g, b]: [number, number, number, number]): number {
-    const channel = (c: number) => {
-        const s = c / 255;
-        return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
-    };
-    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
-}
-
-function contrastRatio(a: [number, number, number, number], b: [number, number, number, number]): number {
-    const l1 = relativeLuminance(a);
-    const l2 = relativeLuminance(b);
-    const [hi, lo] = l1 > l2 ? [l1, l2] : [l2, l1];
-    return (hi + 0.05) / (lo + 0.05);
-}
-
-/** Keep compositing an element's background up the tree until it is opaque. */
-async function effectiveBackground(page: Page, selector: string): Promise<string> {
-    return page.$eval(selector, (el) => {
-        const parse = (v: string) => {
-            const m = v.match(/rgba?\(([^)]+)\)/);
-            if (!m) return null;
-            const p = m[1].split(',').map((x) => parseFloat(x.trim()));
-            return [p[0], p[1], p[2], p[3] ?? 1] as [number, number, number, number];
-        };
-        const overlay = (top: number[], under: number[]) => {
-            const a = top[3];
-            return [
-                top[0] * a + under[0] * (1 - a),
-                top[1] * a + under[1] * (1 - a),
-                top[2] * a + under[2] * (1 - a),
-                1,
-            ];
-        };
-
-        let acc: number[] | null = null;
-        let node: Element | null = el;
-        while (node) {
-            const bg = parse(getComputedStyle(node).backgroundColor);
-            if (bg && bg[3] > 0) {
-                acc = acc === null ? bg : overlay(acc, bg);
-                if (acc[3] >= 1) break;
-            }
-            node = node.parentElement;
-        }
-        if (!acc) return 'rgb(255, 255, 255)';
-        return `rgb(${Math.round(acc[0])}, ${Math.round(acc[1])}, ${Math.round(acc[2])})`;
-    });
-}
-
 async function auditContrast(page: Page, label: string, selector: string, minRatio = 3.0) {
     const locator = page.locator(selector).first();
     if (!(await locator.isVisible().catch(() => false))) {
         return null; // Dialogs differ in markup; a missing node is not a failure.
     }
-    const textColor = await locator.evaluate((el) => getComputedStyle(el).color);
-    const bgColor = await effectiveBackground(page, selector);
-    const fg = parseColor(textColor);
-    const bg = parseColor(bgColor);
-    expect(fg, `unparseable foreground for ${label}`).not.toBeNull();
-    expect(bg, `unparseable background for ${label}`).not.toBeNull();
-    const ratio = contrastRatio(fg!, bg!);
-    expect(
-        ratio,
-        `${label}: contrast ${ratio.toFixed(2)} (fg ${textColor} on bg ${bgColor}) is below ${minRatio}`,
-    ).toBeGreaterThanOrEqual(minRatio);
-    return ratio;
+    return expectReadableText(page, selector, label, minRatio);
 }
 
 async function resetRoom(request: APIRequestContext) {
@@ -217,6 +149,21 @@ test.describe('Dialog contrast audit', () => {
             (el) => getComputedStyle(el).overflowY,
         );
         expect(tabOverflowY, 'settings tab body must scroll').toMatch(/auto|scroll/);
+
+        // Validation text is 12px, so it needs the full 4.5:1 AA ratio, not the
+        // 3.0 floor used for large headings. The fill red measured 3.89:1 here.
+        await page.locator('.toolbox button[title="Share Video"]').first().dispatchEvent('click');
+        const videoDialog = page.locator('.modal-content').first();
+        await videoDialog.waitFor({ state: 'visible', timeout: 8000 });
+        await page.fill('.modal-content input[placeholder*="youtube.com"]', 'https://example.com/nope');
+        await page.locator('#submit-shared-video-btn').click();
+        await expect(page.locator('#shared-video-error')).toBeVisible();
+        const errorRatio = await expectReadableText(
+            page,
+            '#shared-video-error',
+            'shared video validation error',
+        );
+        results['shared-video-error'] = errorRatio;
 
         console.log('contrast audit:', JSON.stringify(results, null, 2));
     });

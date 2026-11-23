@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { expectReadableText } from './contrast';
 
 test.describe('Shared Video', () => {
     test.beforeEach(async ({ request }) => {
@@ -135,9 +136,12 @@ test.describe('Shared Video validation', () => {
             // The error is shown and nothing was broadcast.
             await expect(page.locator('#shared-video-error')).toBeVisible();
             // Inside a dialog the paragraph rule outranks `.form-error` unless
-            // it excludes it, so the text would not be red.
+            // it excludes it, so the text would not be the danger colour. The
+            // ratio matters too: the fill red only reached 3.89:1 on the dialog
+            // surface, under the 4.5:1 AA floor for this 12px text.
             await expect(page.locator('#shared-video-error'))
-                .toHaveCSS('color', 'rgb(239, 68, 68)');
+                .toHaveCSS('color', 'rgb(252, 165, 165)');
+            await expectReadableText(page, '#shared-video-error', 'shared video error');
             await expect(page.locator('h3:has-text("Share Video")')).toBeVisible();
             await expect(page.locator('.shared-video')).toHaveCount(0);
             await context.close();

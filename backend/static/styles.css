@@ -24,6 +24,10 @@
     --success-color: #10b981;
     --success-glow: rgba(16, 185, 129, 0.4);
     --danger-color: #ef4444;
+    /* Text-safe variant: `--danger-color` is a fill (buttons, dots) and only
+       reaches 3.89:1 on `--bg-surface`, below the 4.5:1 AA floor for the 12px
+       `.form-error` text. This lighter red clears 4.5:1 on every surface. */
+    --danger-text: #fca5a5;
     --danger-glow: rgba(239, 68, 68, 0.4);
     --warning-color: #f59e0b;
     --info-color: #06b6d4;
@@ -265,7 +269,7 @@ body {
 
 .badge-danger {
     background: rgba(239, 68, 68, 0.15);
-    color: var(--danger-color);
+    color: var(--danger-text);
     border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
@@ -1404,7 +1408,7 @@ body {
 /* Inline form validation message. Uses theme tokens so it stays legible when
    the palette changes; do not reintroduce literal colours in markup. */
 p.form-error, .form-error {
-    color: var(--danger-color);
+    color: var(--danger-text);
     font-size: var(--font-size-xs);
     margin-top: 6px;
     margin-bottom: 10px;

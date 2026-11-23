@@ -42,6 +42,20 @@ pub fn password_differs(draft: &str, known: &Option<String>, has_password: bool)
     }
 }
 
+/// How the pending edit should be described above the Apply button.
+///
+/// A blank draft against an existing password is a removal, not a save. Saying
+/// "save this change" there hid the fact that pressing Apply drops the
+/// password and leaves the room locked with nobody able to join, which is
+/// exactly the state a host must not enter by accident.
+pub fn pending_password_hint(draft: &str, has_password: bool) -> &'static str {
+    if normalize_password(draft).is_none() && has_password {
+        "Press Apply Password to remove the room password."
+    } else {
+        "Press Apply Password to save this change."
+    }
+}
+
 #[component]
 pub fn SettingsDialog(
     show: ReadSignal<bool>,
@@ -172,11 +186,19 @@ pub fn SettingsDialog(
     // password but the local baseline still holds the old value, so typing
     // that same password after a relock compares equal and Apply stays dead.
     //
-    // Both reads are tracked, so this re-runs on every lock or password change.
+    // Losing host rights invalidates the baseline outright: another host can
+    // replace the password while the lock and presence flags both stay true,
+    // so on a handoff back the cached value may no longer be what the server
+    // holds. Treat any surviving server password as unknown instead.
+    //
+    // Every read is tracked, so this re-runs on any of those changes.
     Effect::new(move |_| {
         let locked = is_locked.map(|l| l.get()).unwrap_or(false);
         let has_pw = has_password.map(|h| h.get()).unwrap_or(false);
-        let known_is_stale = if locked {
+        let host = is_host.map(|h| h.get()).unwrap_or(false);
+        let known_is_stale = if !host {
+            true
+        } else if locked {
             // A known value survives a relock only if the server still has a
             // password; otherwise what we hold is no longer what it has.
             !has_pw
@@ -785,7 +807,10 @@ pub fn SettingsDialog(
                                         )
                                 }>
                                     <p id="password-unsaved" class="settings-hint" style="margin-top: 4px;">
-                                        "Press Apply Password to save this change."
+                                        {move || pending_password_hint(
+                                            &lock_password.get(),
+                                            server_has_password(),
+                                        )}
                                     </p>
                                 </Show>
                                 <p class="settings-hint" style="margin-top: 4px;">
@@ -949,6 +974,34 @@ mod tests {
         assert!(password_differs("", &known, true));
         // Significant spaces are part of the value, not noise.
         assert!(password_differs(" meeting42", &known, true));
+    }
+
+    #[test]
+    fn pending_hint_says_removal_when_a_blank_draft_would_clear_the_password() {
+        // A blank field against a live password is a removal, and pressing
+        // Apply locks everyone out; the prompt must say so.
+        assert_eq!(
+            pending_password_hint("", true),
+            "Press Apply Password to remove the room password."
+        );
+        assert_eq!(
+            pending_password_hint("   ", true),
+            "Press Apply Password to remove the room password."
+        );
+        // Anything else is an ordinary save, including the first password.
+        assert_eq!(
+            pending_password_hint("meeting42", true),
+            "Press Apply Password to save this change."
+        );
+        assert_eq!(
+            pending_password_hint("meeting42", false),
+            "Press Apply Password to save this change."
+        );
+        // Nothing stored and nothing typed is not a removal of anything.
+        assert_eq!(
+            pending_password_hint("", false),
+            "Press Apply Password to save this change."
+        );
     }
 
     /// The two transitions the report called out, as a state machine.
