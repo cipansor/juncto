@@ -83,7 +83,20 @@ function decodePng(buffer: Buffer): { width: number; height: number; pixels: Buf
     return { width, height, pixels, channels };
 }
 
-type TextRun = { color: string; rects: { x: number; y: number; width: number; height: number }[] };
+type TextRun = {
+    color: string;
+    /** Declared channels, before opacity. */
+    rgb: Rgb;
+    /** Inherited opacity x the colour's own alpha. */
+    alpha: number;
+    rects: { x: number; y: number; width: number; height: number }[];
+};
+
+/** The colour a translucent run actually shows over `bg`. */
+function composited(run: TextRun, bg: Rgb): Rgb {
+    const mix = (c: number, b: number) => Math.round(c * run.alpha + b * (1 - run.alpha));
+    return [mix(run.rgb[0], bg[0]), mix(run.rgb[1], bg[1]), mix(run.rgb[2], bg[2])];
+}
 
 /**
  * Every run of text inside the element, with the colour that run is painted in.
@@ -98,19 +111,42 @@ async function textRuns(page: Page, selector: string): Promise<TextRun[]> {
     return page.locator(selector).first().evaluate((el) => {
         const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
         const range = document.createRange();
-        const runs: { color: string; rects: { x: number; y: number; width: number; height: number }[] }[] = [];
+        type Run = {
+            color: string;
+            rgb: [number, number, number];
+            alpha: number;
+            rects: { x: number; y: number; width: number; height: number }[];
+        };
+        const runs: Run[] = [];
         for (let node = walker.nextNode(); node; node = walker.nextNode()) {
             if (!node.textContent?.trim()) continue;
             const parent = node.parentElement;
             if (!parent) continue;
             const style = getComputedStyle(parent);
             if (style.visibility === 'hidden' || style.display === 'none') continue;
-            if (parseFloat(style.opacity) === 0) continue;
+
+            // `opacity` is inherited and multiplies down the tree, so a faded
+            // label's `color` is not the colour that reaches the screen. The
+            // declared colour would score 21:1 for white text at 50% opacity on
+            // black, where the eye sees 5.28:1. The ratio is computed against
+            // each sampled backdrop, because the blend depends on it: white at
+            // 30% is dark on a black card and nearly white on a white one.
+            let alpha = 1;
+            for (let e: Element | null = parent; e; e = e.parentElement) {
+                alpha *= parseFloat(getComputedStyle(e).opacity);
+            }
+            if (alpha === 0) continue;
+
+            const m = style.color.match(/rgba?\(([^)]+)\)/);
+            const parts = m ? m[1].split(',').map((p) => parseFloat(p.trim())) : [0, 0, 0];
+            const rgb: [number, number, number] = [parts[0], parts[1], parts[2]];
+            const a = Math.min(1, alpha * (parts[3] ?? 1));
+
             range.selectNodeContents(node);
             const rects = Array.from(range.getClientRects())
                 .filter((r) => r.width > 0 && r.height > 0)
                 .map((r) => ({ x: r.x, y: r.y, width: r.width, height: r.height }));
-            if (rects.length > 0) runs.push({ color: style.color, rects });
+            if (rects.length > 0) runs.push({ color: style.color, rgb, alpha: a, rects });
         }
         return runs;
     });
@@ -144,37 +180,42 @@ export async function paintedBackdrops(page: Page, selector: string): Promise<Rg
 
 type Shot = { width: number; height: number; pixels: Buffer; channels: number };
 
-/** How close a pixel must be to the sentinel colour to count as glyph paint. */
-const SENTINEL_TOLERANCE = 40;
-
 /**
- * Colours used to paint the text when looking for its footprint. Each is
- * checked against the rendered page first, and the first one that appears
- * nowhere is used.
+ * Per-channel difference above which a pixel changed between the two probe
+ * fills, i.e. is painted by a glyph.
  */
-const SENTINEL_CANDIDATES: Rgb[] = [
+const GLYPH_DELTA = 24;
+
+/** Two fills far apart from each other; neither has to be absent from the page. */
+const PROBE_FILLS: [Rgb, Rgb] = [
     [255, 0, 255],
     [0, 255, 0],
-    [0, 255, 255],
-    [255, 255, 0],
-    [255, 0, 0],
-    [0, 0, 255],
 ];
 
 /**
  * The surface behind the glyphs, plus a mask of which pixels a glyph covers.
  *
- * Two screenshots: one with the text made transparent, which is the true
- * surface, and one with the text painted in a colour that occurs nowhere on the
- * page, which marks the glyph footprint. The mask is then "pixels painted in the
- * sentinel colour", so it does not depend on the text's own colour or on the
- * backdrop.
+ * Three screenshots: the text made transparent, which is the true surface, and
+ * the text painted in each of two probe colours, which mark the glyph footprint.
+ * A pixel is glyph paint when it differs between the two probe fills.
  *
- * Diffing the two screenshots would be the obvious shortcut and it is wrong: a
- * glyph painted the same colour as its backdrop changes no pixel, so the mask
- * would be blind exactly where the text is invisible — the case the audit exists
- * for. Picking the sentinel as "the colour farthest from the backdrop" fails the
- * same way, because a glyph already painted that colour is a no-op.
+ * Both details are load-bearing, and getting either wrong is silent.
+ *
+ * The mask must not be inferred from colour. A filter that keeps pixels
+ * resembling the text deletes the case the audit exists for — text painted the
+ * same colour as its backdrop — and one that keeps pixels resembling a probe
+ * colour counts any backdrop that happens to look like the probe.
+ *
+ * Diffing one probe against the transparent shot is not enough either: a glyph
+ * painted the same colour as a nearby backdrop changes nothing, so the mask is
+ * blind exactly there. Diffing the *two probes against each other* removes the
+ * dependence on the backdrop entirely — a glyph pixel is probe A in one shot and
+ * probe B in the other, so it always differs, whatever is underneath.
+ *
+ * A real-colour render cannot be one of the two shots for the same reason: the
+ * text's own colour may match the backdrop. Both shots are forced, so neither
+ * is blind. The forced fill also catches translucent text, which a
+ * same-colour-as-rendered diff would miss.
  */
 async function glyphLayers(page: Page, selector: string): Promise<{ painted: Shot; glyphs: Uint8Array }> {
     const applyFill = async (fill: string | null) => {
@@ -198,8 +239,14 @@ async function glyphLayers(page: Page, selector: string): Promise<{ painted: Sho
                 // `-webkit-text-fill-color` leaves the background, borders and
                 // shadows alone, which `color` would not: a `background:
                 // currentColor` would vanish and change the very surface being
-                // measured.
-                style.textContent = `[data-contrast-probe], [data-contrast-probe] * { -webkit-text-fill-color: ${value} !important; }`;
+                // measured. `opacity` is deliberately left alone, so translucent
+                // text still shifts when the fill changes.
+                // Animations and a blinking caret change the pixels between the
+                // three screenshots, so the "surface" and the glyph mask would
+                // describe different frames. Freeze them for the probe.
+                style.textContent =
+                    `[data-contrast-probe], [data-contrast-probe] * { -webkit-text-fill-color: ${value} !important;` +
+                    ' animation: none !important; transition: none !important; caret-color: transparent !important; }';
                 return true;
             },
             [selector, fill] as [string, string | null],
@@ -208,35 +255,31 @@ async function glyphLayers(page: Page, selector: string): Promise<{ painted: Sho
     };
 
     try {
-        if (!(await applyFill('transparent'))) return { painted: decodePng(await page.screenshot()), glyphs: new Uint8Array(0) };
+        if (!(await applyFill('transparent'))) {
+            return { painted: decodePng(await page.screenshot()), glyphs: new Uint8Array(0) };
+        }
         const painted = decodePng(await page.screenshot());
-        const sentinel = pickSentinel(painted);
-        await applyFill(`rgb(${sentinel.join(', ')})`);
-        const withText = decodePng(await page.screenshot());
 
-        const glyphs = new Uint8Array(withText.width * withText.height);
+        const probes: Shot[] = [];
+        for (const fill of PROBE_FILLS) {
+            await applyFill(`rgb(${fill.join(', ')})`);
+            probes.push(decodePng(await page.screenshot()));
+        }
+
+        const [a, b] = probes;
+        const glyphs = new Uint8Array(a.width * a.height);
         for (let i = 0; i < glyphs.length; i += 1) {
-            const o = i * withText.channels;
-            const distance =
-                Math.abs(withText.pixels[o] - sentinel[0]) +
-                Math.abs(withText.pixels[o + 1] - sentinel[1]) +
-                Math.abs(withText.pixels[o + 2] - sentinel[2]);
-            if (distance <= SENTINEL_TOLERANCE) glyphs[i] = 1;
+            const o = i * a.channels;
+            const delta =
+                Math.abs(a.pixels[o] - b.pixels[o]) +
+                Math.abs(a.pixels[o + 1] - b.pixels[o + 1]) +
+                Math.abs(a.pixels[o + 2] - b.pixels[o + 2]);
+            if (delta > GLYPH_DELTA) glyphs[i] = 1;
         }
         return { painted, glyphs };
     } finally {
         await applyFill(null);
     }
-}
-
-/** A colour that appears nowhere in the screenshot, so painted text is unambiguous. */
-function pickSentinel(shot: Shot): Rgb {
-    const present = new Set<string>();
-    for (let i = 0; i < shot.width * shot.height; i += 1) {
-        const o = i * shot.channels;
-        present.add(`${shot.pixels[o]},${shot.pixels[o + 1]},${shot.pixels[o + 2]}`);
-    }
-    return SENTINEL_CANDIDATES.find((c) => !present.has(c.join(','))) ?? SENTINEL_CANDIDATES[0];
 }
 
 /**
@@ -315,9 +358,7 @@ export async function expectReadableText(
     let worst: { ratio: number; color: string; bg: Rgb } | null = null;
     let measured = 0;
     for (const run of runs) {
-        const fg = parseColor(run.color);
-        if (!fg) continue;
-        const rgb: Rgb = [fg[0], fg[1], fg[2]];
+        if (!parseColor(run.color)) continue;
         for (const rect of run.rects) {
             const backdrops = backdropsForRect(painted, glyphs, rect);
             if (backdrops.length === 0) continue; // No visible glyphs on this line.
@@ -327,10 +368,11 @@ export async function expectReadableText(
             // narrow unreadable band is exactly the case that matters, and the
             // band is precisely what a threshold discards.
             for (const bg of backdrops) {
-                const ratio = contrastRatio(rgb, bg);
+                const fg = composited(run, bg);
+                const ratio = contrastRatio(fg, bg);
                 expect(Number.isFinite(ratio), `${label}: non-finite contrast`).toBe(true);
                 if (worst === null || ratio < worst.ratio) {
-                    worst = { ratio, color: run.color, bg };
+                    worst = { ratio, color: `rgb(${fg.join(', ')})`, bg };
                 }
             }
         }

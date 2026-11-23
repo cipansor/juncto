@@ -159,21 +159,35 @@ The shared helper (`contrast.ts`) samples the rendered pixels rather than recons
 backdrop from CSS, because a `background-color` walk cannot see what the browser composites:
 the landing page paints a radial gradient in `background-image` behind a translucent card
 with `backdrop-filter`, so a reconstructed colour would be the card over the body, not the
-card over the gradient users see. Four details make the sample honest:
+card over the gradient users see. Five details make the sample honest:
 
-* **Text hidden before sampling.** The screenshot is taken with
+* **Text hidden before sampling.** The surface is read from a screenshot taken with
   `-webkit-text-fill-color: transparent` on the audited subtree, so every pixel in a line
-  box is the surface behind the words. The earlier approach kept the glyphs and discarded
-  pixels that resembled the text colour, which cannot be made sound: a backdrop matching
-  the text colour *is* the unreadable case, so the filter deletes the evidence. White text
-  on a mostly-white line kept only the dark patch beside it and scored 21:1 while most of
-  the letters were invisible. `-webkit-text-fill-color` is used rather than `color:
-  transparent` because it leaves backgrounds, borders and shadows alone — a
+  box is the surface behind the words. `-webkit-text-fill-color` is used rather than
+  `color: transparent` because it leaves backgrounds, borders and shadows alone — a
   `background: currentColor` would otherwise vanish and change the surface being measured.
-* **Per text run.** Colour is read per text node, not from the audited element. The audit
-  target is often a container — `.chat-container` holds a white heading, a muted label and a
-  white-on-blue button — so the container's own colour (black, inherited) scored against the
-  dark card would report 1.44:1 for a container whose text is all legible.
+* **Glyph footprint from two forced fills, never from colour.** The mask comes from two
+  further screenshots with the text painted magenta and then green; a pixel is glyph paint
+  when it differs between them. Inferring the mask from colour cannot be made sound: a
+  filter that keeps pixels resembling the text deletes the unreadable case it exists for,
+  and a filter that keeps pixels resembling a probe counts any decoration that happens to
+  look like one — a near-magenta strip beside the words was counted as text and made white
+  letters fail at 3.18:1 against a band they never touched. Diffing a single probe against
+  the hidden-text shot is not enough either: a glyph painted the same colour as its
+  backdrop changes nothing there. Two forced fills differ from *each other* whatever lies
+  underneath, so neither is blind. Both shots are forced rather than one being the real
+  render for the same reason.
+* **Per text run, at its effective colour.** Colour is read per text node, not from the
+  audited element. The audit target is often a container — `.chat-container` holds a white
+  heading, a muted label and a white-on-blue button — so the container's own colour (black,
+  inherited) scored against the dark card would report 1.44:1 for a container whose text is
+  all legible. The colour is the *composited* one: inherited `opacity` multiplies down the
+  tree, and the run is blended over the sampled backdrop, so white at 30% is `rgb(77, 77, 77)`
+  and 2.48:1 on a black card but still white and 1.00:1 on a white one. Scoring the
+  declaration let faded text pass, and a mask that missed translucent glyphs skipped the line
+  entirely, so a readable sibling could carry the whole element to a pass. Blending toward a
+  fixed colour instead of the sampled one is not a safe simplification: toward black it calls
+  faded white on white 8.45:1 and passes it.
 * **Per line box.** The sample is restricted to the text's own line boxes, so a short
   message in a wide paragraph is measured where the glyphs are, not where the box happens
   to be empty. A gradient crossing the text yields one surface per line and the worst line
@@ -183,6 +197,17 @@ card over the gradient users see. Four details make the sample honest:
   narrow unreadable band is exactly the case that matters, and a threshold discards
   precisely that. A share also depends on how wide the font renders, so a thresholded
   audit can change verdict between machines.
+
+Animation and the text caret are frozen for the duration of the probe (`animation: none`,
+`caret-color: transparent` on the audited subtree). Three screenshots of a moving element are
+three different frames: a fading label moved between the surface shot and the mask shot, so
+the surface sampled under its glyphs was the glyph itself and the chat panel reported 1.11:1
+instead of 3.98:1. A frozen frame is the only thing that can be measured. Note that freezing
+pins the *first* keyframe, not the settled state: a fade that begins unreadable is reported
+unreadable, which is the conservative reading. The chat-panel assertion in
+`contrast-audit.spec.ts` is what proves this — removing the freeze turns it red at 1.11:1,
+whereas a synthetic fade in the helper spec was too slow to land mid-frame and passed either
+way.
 
 Only rows inside the screenshot are read. A line below the fold has no pixels to measure,
 and reading past the last row yields `undefined` channels and a `NaN` ratio. A `NaN` does

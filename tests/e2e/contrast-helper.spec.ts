@@ -104,6 +104,65 @@ test.describe('contrast helper sampling', () => {
         );
     });
 
+    test('a backdrop that resembles the probe colour is not counted as text', async ({ page }) => {
+        // The strip is within tolerance of a probe colour but nothing is painted
+        // on it, so it must not enter the sample. Counting it made white text
+        // fail at 3.18:1 against a decoration it never touches.
+        await page.setContent(`
+            <div style="background:#000000;padding:10px;width:420px">
+              <p id="t" style="margin:0;color:#ffffff;font:20px/30px sans-serif">white<span
+                 style="display:inline-block;width:120px;height:20px;background:rgb(254,0,250)"></span>text</p>
+            </div>
+        `);
+        expect(await expectReadableText(page, '#t', 'strip', 4.5)).toBeGreaterThan(15);
+    });
+
+    test('translucent text is measured instead of skipped', async ({ page }) => {
+        // White at 30% over black is rgb(77,77,77), 2.48:1 — unreadable. An
+        // audit that only saw the declared colour would score 21:1, and one
+        // whose mask missed translucent glyphs skipped the line entirely, so a
+        // readable sibling could carry the whole element to a pass.
+        await page.setContent(`
+            <div style="background:#000000;padding:10px;width:420px">
+              <p id="t" style="margin:0;color:#ffffff;opacity:0.3;font:20px/30px sans-serif">faded words here</p>
+            </div>
+        `);
+        await expect(expectReadableText(page, '#t', 'faded', 4.5)).rejects.toThrow(
+            /contrast 2\.4\d .* is below 4\.5/,
+        );
+    });
+
+    test('a readable sibling cannot carry a translucent one', async ({ page }) => {
+        await page.setContent(`
+            <div id="c" style="background:#000000;padding:10px;width:420px">
+              <p style="margin:0;color:#ffffff;font:20px/30px sans-serif">bright and readable</p>
+              <p style="margin:0;color:#ffffff;opacity:0.3;font:20px/30px sans-serif">faded words here</p>
+            </div>
+        `);
+        await expect(expectReadableText(page, '#c', 'mixed', 4.5)).rejects.toThrow(/is below 4\.5/);
+    });
+
+    test('faded text is scored against the backdrop it fades into', async ({ page }) => {
+        // White at 30% over a white panel is still white: 1.00:1, invisible.
+        // Blending toward black instead of toward the sampled backdrop would
+        // call it 8.45:1 and pass. The same declaration on a black card is
+        // 2.48:1, so the blend has to follow the surface, not a fixed guess.
+        await page.setContent(`
+            <div style="background:#ffffff;padding:10px;width:420px">
+              <p id="light" style="margin:0;color:#ffffff;opacity:0.3;font:20px/30px sans-serif">faded on white</p>
+            </div>
+            <div style="background:#000000;padding:10px;width:420px">
+              <p id="dark" style="margin:0;color:#ffffff;opacity:0.3;font:20px/30px sans-serif">faded on black</p>
+            </div>
+        `);
+        await expect(expectReadableText(page, '#light', 'faded on white', 4.5)).rejects.toThrow(
+            /contrast 1\.00 .* is below 4\.5/,
+        );
+        await expect(expectReadableText(page, '#dark', 'faded on black', 4.5)).rejects.toThrow(
+            /contrast 2\.4\d .* is below 4\.5/,
+        );
+    });
+
     test('a line below the fold is skipped instead of producing a NaN score', async ({ page }) => {
         // The line box is off the screenshot. Reading rows the PNG does not have
         // yields undefined channel values, and a NaN ratio passes every
