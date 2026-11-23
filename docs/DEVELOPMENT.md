@@ -119,7 +119,7 @@ PNG per screen to `tests/screenshots/`. It is the source of every image in the R
 cd tests/e2e && npx playwright test screenshot-gallery.spec.ts
 ```
 
-The file names are ordered and stable (`01-home.png` … `42-settings-moderator.png`). If you
+The file names are ordered and stable (`01-home.png` … `44-room-narrow-header.png`). If you
 add a screen, append the next number; if you renumber, update the README tables in the same
 commit.
 
@@ -135,6 +135,14 @@ two assertions run in `afterAll`:
   the mobile settings dialog) and skip themselves when the state cannot be reached; without
   the manifest a skipped capture is simply absent and the run still passes, leaving a
   broken image in the README.
+
+The recorded names are written to a manifest under the OS temp directory, keyed by the run
+id in `E2E_RUN_ID` (set once in `playwright.config.ts`). This is not bookkeeping: CI runs
+with `retries: 2`, and a retry starts a fresh worker with a fresh module instance, so an
+in-memory list is empty on the second attempt. `afterAll` then reported every view from the
+first attempt as missing and failed a run whose files were all present. Keeping the list on
+disk makes the completeness check answer the question it is meant to — did this run capture
+everything? — across attempts.
 
 Screens that depend on timing are still skipped with an annotation rather than failing on
 the spot, but a skip now fails the run at the end. When that happens, the fix is to make the
@@ -252,6 +260,13 @@ reported 1.10:1 for text that is legible. The header now reserves that corner
 wherever it runs, asserting that no badge text is covered and that the header still scores
 above 3:1.
 
+The ink is read **per surface**, not once per run. One ink for the whole run is a false
+pass the moment the text is translucent: half-opacity black over a white/black split measures
+as `rgb(128, 128, 128)`, which clears 3:1 against *both* halves, while the letters over the
+black half are pure black and invisible. `inkBySurface` groups the glyph pixels by the surface
+under each one, measures the best-covered ink within each group, and scores that pair. A
+group holding only a sliver of edge pixels can only lower a score, never raise one.
+
 Only rows inside the screenshot are read. A line below the fold has no pixels to measure,
 and reading past the last row yields `undefined` channels and a `NaN` ratio. A `NaN` does
 not survive to the assertion — `toBeGreaterThanOrEqual` rejects it — but it can vanish
@@ -270,6 +285,28 @@ cd tests/e2e && npx playwright test contrast-audit.spec.ts
 
 It prints a per-dialog ratio table on the way through, which is handy when you are
 adjusting a specific panel.
+
+### The room header on a narrow screen
+
+The header is one flex row: logo, title, subject, timer, connection dot and badges. Two
+things about it are easy to get wrong, and both are pinned by tests.
+
+**The title spends the bar on a prefix.** Above 768px the chat panel is open by default and
+takes 340px, so a 780px window leaves a 440px header. The title used to be a single string,
+`Meeting Room: <name>`, and at that width the generic prefix consumed the whole heading: the
+bar showed `Meeting R` and the room name itself was never visible. The prefix is now its own
+element (`.room-header-prefix`) and the name is `.room-name`, which carries the truncation.
+A **container query** on `.room-header` hides the prefix below 520px of *bar* width. It has
+to be a container query, not a media query: the thing that squeezes the bar is the side
+panel, which the window width does not describe.
+
+**The bell needs its corner at every width.** The notification bell is absolutely positioned
+over the top-right corner of `.capture-area`, which is where the header's badges end. The
+header reserves that corner with `padding-right`, but the mobile rule
+(`@media (max-width: 768px)`) sets `.room-header`'s padding wholesale and used to give the
+corner back: at 768px the bell covered 30px of the lock badge. The reserve is repeated in the
+mobile rule. If you touch either padding, run `contrast-audit.spec.ts` — it checks both the
+desktop and the mobile case, and the failure shows up as a contrast ratio, not as an overlap.
 
 ## Stylesheet and design tokens
 

@@ -229,7 +229,10 @@ pub fn Room() -> impl IntoView {
                                                     alt="Branding Logo"
                                                 />
                                             </Show>
-                                            <h2>{move || format!("Meeting Room: {}", room_id())}</h2>
+                                            <h2 title=move || format!("Meeting Room: {}", room_id())>
+                                                <span class="room-header-prefix">"Meeting Room: "</span>
+                                                <span class="room-name">{move || room_id()}</span>
+                                            </h2>
                                             <Show when=move || state.room_config.get().subject.as_ref().is_some_and(|s| !s.is_empty())>
                                                 <span id="meeting-subject" class="badge-info">
                                                     {move || state.room_config.get().subject.unwrap_or_default()}

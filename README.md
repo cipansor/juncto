@@ -66,9 +66,9 @@ for how the gallery and the contrast audit work.
 |---|---|---|
 | ![Notifications](./tests/screenshots/13-notifications.png) | ![Speaker stats](./tests/screenshots/17-speaker-stats.png) | ![Whiteboard](./tests/screenshots/14-whiteboard.png) |
 
-| A long room name |
-|---|
-| ![A long room name in the header](./tests/screenshots/43-room-long-name.png) |
+| A long room name | A narrow header, chat open |
+|---|---|
+| ![A long room name in the header](./tests/screenshots/43-room-long-name.png) | ![The room name surviving a narrow header](./tests/screenshots/44-room-narrow-header.png) |
 
 | Breakout rooms | Reactions | Subtitles |
 |---|---|---|

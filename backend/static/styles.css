@@ -189,6 +189,10 @@ body {
     border-bottom: 1px solid var(--border-color);
     z-index: 50;
     height: 64px;
+    /* A query container, so the title reacts to the space the bar actually has:
+       the side panel is open by default above 768px and takes 340px, leaving a
+       440px bar at a 780px viewport, which a window media query cannot see. */
+    container-type: inline-size;
 }
 
 .room-header-title {
@@ -206,12 +210,34 @@ body {
 .room-header h2 {
     margin: 0;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    display: flex;
+    align-items: baseline;
     font-size: var(--font-size-lg);
     font-weight: 600;
     color: var(--text-primary);
+}
+
+/* The generic prefix is the same width whatever the room is called, and it was
+   the only part of the title that survived once the bar got narrow: at 780px
+   with the default chat panel the heading showed "Meeting R" and the room name
+   itself was cut off. The name gets the truncation; the prefix is dropped when
+   the bar cannot hold both. */
+.room-header-prefix {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.room-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+@container (max-width: 520px) {
+    .room-header-prefix {
+        display: none;
+    }
 }
 
 .header-badges {
@@ -1732,7 +1758,10 @@ p.form-error, .form-error {
     }
 
     .room-header {
-        padding: 8px 12px;
+        /* The bell still floats over this bar's top-right corner on mobile, so
+           the reserve is kept here too: the desktop rule is overridden by this
+           one, and without it the bell covers the lock badge again. */
+        padding: 8px 56px 8px 12px;
         height: 56px;
     }
 

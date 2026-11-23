@@ -204,51 +204,76 @@ const PROBE_FILLS: [Rgb, Rgb] = [
  * reported the green badge as `rgb(9, 111, 77)` against `rgb(9, 28, 37)` where
  * the ink is `rgb(16, 185, 129)`.
  *
- * The ink is measured once for the run and then scored against every surface
- * under it. Measuring per surface instead fragments the sample: a text rect
- * grazing a border splits into several surfaces, and the sliver over the border
- * holds only edge pixels, whose blend is not the ink. Scoring one measured ink
- * against every surface is still sound for text that straddles a boundary —
- * white letters over a black/white split measure as white and fail at 1.00:1
- * against the white half, which is the case the audit exists for.
+ * The ink is measured per surface, from the glyph pixels that sit on that
+ * surface. One ink for the whole run is a false pass the moment the text is
+ * translucent: half-opacity black over a white/black split measures as
+ * `rgb(128, 128, 128)` — which clears 3:1 against *both* halves — while the
+ * letters over the black half are `rgb(0, 0, 0)` and invisible. Pairing each
+ * pixel's ink with the surface under that pixel is the only reading that
+ * survives a split.
+ *
+ * A surface that holds only a sliver of edge pixels still gets scored: its
+ * ink is the best-covered pixel available there, and a sliver of antialiased
+ * edge blends toward its own surface, which reads as *lower* contrast. That
+ * can only fail a line, never pass one — the opposite of the false pass this
+ * replaces.
  */
-function measureInk(rendered: Shot, painted: Shot, glyphs: Uint8Array, rect: Rect): Rgb | null {
+function inkBySurface(
+    rendered: Shot,
+    painted: Shot,
+    glyphs: Uint8Array,
+    rect: Rect,
+): { surface: Rgb; ink: Rgb }[] {
     const { width, height } = rendered;
     const y0 = Math.max(0, Math.floor(rect.y));
     const y1 = Math.min(Math.floor(rect.y + rect.height), height - 1);
     const x0 = Math.max(0, Math.floor(rect.x));
     const x1 = Math.min(Math.floor(rect.x + rect.width), width - 1);
-    if (x1 < x0 || y1 < y0) return null;
+    if (x1 < x0 || y1 < y0) return [];
 
-    const samples: { distance: number; rgb: Rgb }[] = [];
+    const groups = new Map<string, { surface: Rgb; samples: { distance: number; rgb: Rgb }[] }>();
     for (let y = y0; y <= y1; y += 1) {
         for (let x = x0; x <= x1; x += 1) {
             const i = y * width + x;
             if (glyphs[i] !== 1) continue;
             const ro = i * rendered.channels;
             const bo = i * painted.channels;
+            const surface: Rgb = [
+                painted.pixels[bo],
+                painted.pixels[bo + 1],
+                painted.pixels[bo + 2],
+            ];
             const rgb: Rgb = [rendered.pixels[ro], rendered.pixels[ro + 1], rendered.pixels[ro + 2]];
             const distance =
-                Math.abs(rgb[0] - painted.pixels[bo]) +
-                Math.abs(rgb[1] - painted.pixels[bo + 1]) +
-                Math.abs(rgb[2] - painted.pixels[bo + 2]);
-            samples.push({ distance, rgb });
+                Math.abs(rgb[0] - surface[0]) +
+                Math.abs(rgb[1] - surface[1]) +
+                Math.abs(rgb[2] - surface[2]);
+            const key = surface.join(',');
+            const group = groups.get(key);
+            if (group) group.samples.push({ distance, rgb });
+            else groups.set(key, { surface, samples: [{ distance, rgb }] });
         }
     }
-    if (samples.length === 0) return null;
 
-    samples.sort((a, b) => b.distance - a.distance);
-    const take = Math.max(1, Math.floor(samples.length / 10));
-    const best = samples.slice(0, take);
-    const sum = best.reduce(
-        (acc, s) => [acc[0] + s.rgb[0], acc[1] + s.rgb[1], acc[2] + s.rgb[2]],
-        [0, 0, 0],
-    );
-    return [
-        Math.round(sum[0] / best.length),
-        Math.round(sum[1] / best.length),
-        Math.round(sum[2] / best.length),
-    ];
+    const result: { surface: Rgb; ink: Rgb }[] = [];
+    for (const { surface, samples } of groups.values()) {
+        samples.sort((a, b) => b.distance - a.distance);
+        const take = Math.max(1, Math.floor(samples.length / 10));
+        const best = samples.slice(0, take);
+        const sum = best.reduce(
+            (acc, s) => [acc[0] + s.rgb[0], acc[1] + s.rgb[1], acc[2] + s.rgb[2]],
+            [0, 0, 0],
+        );
+        result.push({
+            surface,
+            ink: [
+                Math.round(sum[0] / best.length),
+                Math.round(sum[1] / best.length),
+                Math.round(sum[2] / best.length),
+            ],
+        });
+    }
+    return result;
 }
 
 /**
@@ -432,19 +457,21 @@ export async function expectReadableText(
     for (const run of runs) {
         if (!parseColor(run.color)) continue;
         for (const rect of run.rects) {
-            const backdrops = backdropsForRect(painted, glyphs, rect);
-            const ink = measureInk(rendered, painted, glyphs, rect);
-            if (backdrops.length === 0 || ink === null) continue; // No visible glyphs here.
+            // Each surface under the letters is scored with the ink measured on
+            // *that* surface. One ink per run is a false pass on a split: see
+            // `inkBySurface`.
+            const pairs = inkBySurface(rendered, painted, glyphs, rect);
+            if (pairs.length === 0) continue; // No visible glyphs here.
             measured += 1;
             // Every surface under the letters is scored, with no minimum share.
             // A share threshold is a false-pass by construction: text crossing a
             // narrow unreadable band is exactly the case that matters, and the
             // band is precisely what a threshold discards.
-            for (const bg of backdrops) {
-                const ratio = contrastRatio(ink, bg);
+            for (const { surface, ink } of pairs) {
+                const ratio = contrastRatio(ink, surface);
                 expect(Number.isFinite(ratio), `${label}: non-finite contrast`).toBe(true);
                 if (worst === null || ratio < worst.ratio) {
-                    worst = { ratio, color: `rgb(${ink.join(', ')})`, bg };
+                    worst = { ratio, color: `rgb(${ink.join(', ')})`, bg: surface };
                 }
             }
         }

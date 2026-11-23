@@ -104,6 +104,21 @@ test.describe('contrast helper sampling', () => {
         );
     });
 
+    test('translucent text across a split is scored per surface', async ({ page }) => {
+        // Half-opacity black over a white/black split. Measured as one ink for
+        // the whole run, the pixels average to rgb(128,128,128), which clears
+        // 3:1 against *both* halves — a false pass for letters that are pure
+        // black, and invisible, over the black half. The ink has to be read
+        // against the surface under each pixel.
+        await page.setContent(`
+            <p id="t" style="margin:0;width:600px;font:20px/40px sans-serif;color:#000000;opacity:0.5;
+               background:linear-gradient(to right,#ffffff 0 50%,#000000 50% 100%)">translucent words over a split surface</p>
+        `);
+        await expect(expectReadableText(page, '#t', 'translucent split', 3)).rejects.toThrow(
+            /is below 3/,
+        );
+    });
+
     test('a backdrop that resembles the probe colour is not counted as text', async ({ page }) => {
         // The overlay is within tolerance of a probe colour and covers part of
         // the text's own rect, so it lies inside the sampled area. No glyph pixel

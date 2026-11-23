@@ -243,4 +243,67 @@ test.describe('Dialog contrast audit', () => {
         expect(overlap, 'the bell must not cover any badge text').toBe(0);
         expect(await expectReadableText(page, '.room-header', 'room header', 3.0)).toBeGreaterThan(3.0);
     });
+
+    test('the bell clears the badges on mobile too', async ({ page, request }) => {
+        // The mobile rule overrides `.room-header`'s padding wholesale, so the
+        // corner reserved for the bell on desktop was given back at 768px and
+        // below: the bell covered 30px of the lock badge at 768px. The reserve
+        // has to be repeated in the mobile rule, not inherited.
+        for (const width of [768, 600, 390]) {
+            await resetRoom(request);
+            await page.setViewportSize({ width, height: 800 });
+            await page.goto(`/room/BellMobile_${width}_${Date.now()}`);
+            await page.waitForSelector('#display-name');
+            await page.fill('#display-name', 'BellMobile');
+            await page.click('.join-btn');
+            await expect(page.locator('.room-container')).toBeVisible({ timeout: 20000 });
+            await page.waitForTimeout(1200);
+
+            const clearance = await page.evaluate(() => {
+                const badge = document.querySelector(
+                    '.room-header .badge-success, .room-header .badge-danger',
+                ) as HTMLElement;
+                const bell = document.querySelector('#notif-bell-btn') as HTMLElement;
+                if (!badge || !bell) return null;
+                const b = badge.getBoundingClientRect();
+                const c = bell.getBoundingClientRect();
+                return Math.round(Math.min(b.right, c.right) - Math.max(b.left, c.left));
+            });
+            expect(clearance, `bell must not reach the badge at ${width}px`).not.toBeNull();
+            expect(clearance!, `bell must not cover the badge at ${width}px`).toBeLessThanOrEqual(0);
+        }
+    });
+
+    test('the room name stays readable when the bar is narrow', async ({ page, request }) => {
+        // Chat is open by default above 768px and takes 340px, so a 780px
+        // window leaves a 440px header. The single-line title used to spend all
+        // of that on the generic "Meeting Room: " prefix: the heading read
+        // "Meeting R" and the name itself was never shown. The prefix is now
+        // its own element, dropped when the bar is too narrow for both.
+        await resetRoom(request);
+        await page.setViewportSize({ width: 780, height: 800 });
+        await page.goto(`/room/Demo_${Date.now()}`);
+        await page.waitForSelector('#display-name');
+        await page.fill('#display-name', 'NarrowChecker');
+        await page.click('.join-btn');
+        await expect(page.locator('.room-container')).toBeVisible({ timeout: 20000 });
+        await page.waitForTimeout(1500);
+
+        const shown = await page.evaluate(() => {
+            const name = document.querySelector('.room-name') as HTMLElement;
+            const box = name.getBoundingClientRect();
+            const text = name.textContent ?? '';
+            let visible = '';
+            for (let i = 0; i < text.length; i += 1) {
+                const range = document.createRange();
+                range.setStart(name.firstChild!, i);
+                range.setEnd(name.firstChild!, i + 1);
+                const char = range.getBoundingClientRect();
+                if (char.width > 0 && char.right <= box.right + 0.5) visible += text[i];
+            }
+            return visible;
+        });
+        expect(shown, 'the room name itself must be visible, not just the prefix').toBeTruthy();
+        expect(shown).toMatch(/^Demo_\d+$/);
+    });
 });

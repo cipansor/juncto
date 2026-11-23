@@ -1,5 +1,6 @@
 import { test, expect, Page, APIRequestContext } from '@playwright/test';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const OUT = process.env.SCREENSHOT_DIR || '../screenshots';
@@ -50,6 +51,7 @@ const REQUIRED_SHOTS = [
     '34-visitor-mode', '35-lobby', '36-rejoin-overlay', '37-mobile-home',
     '38-mobile-prejoin', '39-mobile-room', '40-mobile-chat',
     '41-mobile-settings', '42-settings-moderator', '43-room-long-name',
+    '44-room-narrow-header',
 ] as const;
 
 function expectEveryViewCaptured(captured: string[]) {
@@ -126,7 +128,13 @@ async function capture(
     captured: string[],
     dir: string,
 ) {
-    captured.push(name);
+    // `captured` is a set — the persisted manifest, so a retry does not re-add
+    // the views the first attempt wrote. The append-only list is what the
+    // duplicate-number check reads: deduping it would hide a spec that captured
+    // the same number twice.
+    written.push(name);
+    if (!captured.includes(name)) captured.push(name);
+    recordCaptured(captured);
     await target.screenshot({ path: `${dir}/${name}.png` });
     expect(
         fs.existsSync(`${dir}/${name}.png`),
@@ -134,8 +142,37 @@ async function capture(
     ).toBe(true);
 }
 
+/**
+ * The names captured so far, kept on disk as well as in memory.
+ *
+ * A retry runs in a fresh worker with a fresh module instance, so an in-memory
+ * list is empty on the second attempt and `afterAll` then reports the first
+ * attempt's views as missing — failing a run whose files are all present. The
+ * manifest is scoped to the run id so a stale manifest from an earlier run
+ * cannot vouch for a view this run never captured.
+ */
+const written: string[] = [];
+
+const MANIFEST = path.join(
+    os.tmpdir(),
+    `juncto-gallery-${process.env.E2E_RUN_ID ?? 'local'}.json`,
+);
+
+function loadCaptured(): string[] {
+    try {
+        const raw = JSON.parse(fs.readFileSync(MANIFEST, 'utf8')) as unknown;
+        return Array.isArray(raw) ? raw.filter((n): n is string => typeof n === 'string') : [];
+    } catch {
+        return [];
+    }
+}
+
+function recordCaptured(names: string[]) {
+    fs.writeFileSync(MANIFEST, JSON.stringify(names));
+}
+
 test.describe('UI screenshot gallery', () => {
-    const captured: string[] = [];
+    const captured: string[] = loadCaptured();
 
     test('capture every frontend view', async ({ page, context, request }) => {
         test.setTimeout(420_000);
@@ -531,11 +568,27 @@ test.describe('UI screenshot gallery', () => {
         await capture(page, '43-room-long-name', captured, OUT);
     });
 
+    test('capture the header when the bar is narrow', async ({ page, request }) => {
+        // Chat is open by default above 768px and takes 340px, so a 780px
+        // window leaves a 440px header. The generic prefix used to fill it and
+        // the room name was cut off entirely; now the prefix steps aside.
+        fs.mkdirSync(OUT_DIR, { recursive: true });
+        await resetRoom(request);
+        await page.setViewportSize({ width: 780, height: 800 });
+        await page.goto(`/room/Narrow_${Date.now()}`);
+        await page.waitForSelector('#display-name');
+        await page.fill('#display-name', 'GalleryNarrow');
+        await page.click('.join-btn');
+        await expect(page.locator('.room-container')).toBeVisible({ timeout: 20000 });
+        await page.waitForTimeout(1500);
+        await capture(page, '44-room-narrow-header', captured, OUT);
+    });
+
     test.afterAll(() => {
         // Runs even when a capture fails partway, so a run that writes the same
         // number twice, or skips a view entirely, is reported rather than left
         // for a reviewer to spot.
-        expectUniqueScreenshotNumbers(captured);
+        expectUniqueScreenshotNumbers(written);
         expectEveryViewCaptured(captured);
     });
 });
