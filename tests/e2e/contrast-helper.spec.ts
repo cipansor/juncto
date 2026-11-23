@@ -105,13 +105,22 @@ test.describe('contrast helper sampling', () => {
     });
 
     test('a backdrop that resembles the probe colour is not counted as text', async ({ page }) => {
-        // The strip is within tolerance of a probe colour but nothing is painted
-        // on it, so it must not enter the sample. Counting it made white text
-        // fail at 3.18:1 against a decoration it never touches.
+        // The overlay is within tolerance of a probe colour and covers part of
+        // the text's own rect, so it lies inside the sampled area. No glyph pixel
+        // is visible there — the overlay is opaque and sits on top — so the
+        // overlay must not enter the sample. A mask that keeps pixels resembling
+        // a probe colour counts it and reports white on magenta, 3.18:1, for
+        // text that never touches it.
+        //
+        // The overlay is anchored to the paragraph's left edge and the text is
+        // long enough to span it, so the overlap does not depend on font metrics.
         await page.setContent(`
-            <div style="background:#000000;padding:10px;width:420px">
-              <p id="t" style="margin:0;color:#ffffff;font:20px/30px sans-serif">white<span
-                 style="display:inline-block;width:120px;height:20px;background:rgb(254,0,250)"></span>text</p>
+            <div style="background:#000000;padding:10px;width:460px">
+              <p id="t" style="margin:0;position:relative;color:#ffffff;font:20px/30px sans-serif">
+                white words that span the whole width of this line
+                <span style="position:absolute;left:60px;top:2px;width:70px;height:22px;
+                            background:rgb(254,0,250)"></span>
+              </p>
             </div>
         `);
         expect(await expectReadableText(page, '#t', 'strip', 4.5)).toBeGreaterThan(15);
@@ -161,6 +170,39 @@ test.describe('contrast helper sampling', () => {
         await expect(expectReadableText(page, '#dark', 'faded on black', 4.5)).rejects.toThrow(
             /contrast 2\.4\d .* is below 4\.5/,
         );
+    });
+
+    test('a faded panel does not fade the text relative to its own surface', async ({ page }) => {
+        // `opacity` on the panel fades the panel and its text together, so black
+        // text on a half-opacity white panel over black still renders at 5.32:1.
+        // Fading the declared colour without fading the panel reports 2.63:1 and
+        // rejects readable text. The ink has to be measured, not modelled.
+        await page.setContent(`
+            <div style="background:#000000;padding:20px">
+              <div style="background:#ffffff;opacity:0.5;padding:20px">
+                <p id="t" style="margin:0;color:#000000;font:20px/30px sans-serif">black on a faded white panel</p>
+              </div>
+            </div>
+        `);
+        expect(await expectReadableText(page, '#t', 'faded panel', 4.5)).toBeGreaterThan(5);
+    });
+
+    test('geometry is read in the same frame as the pixels', async ({ page }) => {
+        // An entrance animation slides the text and fades it in. If the rects are
+        // captured before the probe freezes the animation, the mask is sampled
+        // where the text used to be and the line reads as having no glyphs at
+        // all — the audit then skips it and passes vacuously.
+        await page.setContent(`
+            <style>
+              @keyframes enter { from { transform: translateX(300px); opacity: 0.2 }
+                                 to { transform: translateX(0); opacity: 1 } }
+              #t { animation: enter 10s linear; }
+            </style>
+            <div style="background:#000000;padding:10px;width:420px">
+              <p id="t" style="margin:0;color:#ffffff;font:20px/30px sans-serif">sliding in slowly</p>
+            </div>
+        `);
+        expect(await expectReadableText(page, '#t', 'entering', 4.5)).toBeGreaterThan(15);
     });
 
     test('a line below the fold is skipped instead of producing a NaN score', async ({ page }) => {

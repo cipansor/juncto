@@ -167,4 +167,42 @@ test.describe('Dialog contrast audit', () => {
 
         console.log('contrast audit:', JSON.stringify(results, null, 2));
     });
+
+    test('a long room name does not push the header badges out of the bar', async ({ page, request }) => {
+        // The header is a single flex row: title, subject, timer, connection dot
+        // and badges. Without a shrink limit the title grows to its full text
+        // width, the row overflows, and the badges are laid out past the right
+        // edge of the bar — on top of the page behind it. They are then genuinely
+        // unreadable, and the contrast audit catches it as light-on-light
+        // (`rgb(216, 218, 221)` on `rgb(192, 193, 197)`), not as an overflow.
+        //
+        // The name is long enough to overflow at every width tested, so this does
+        // not depend on font metrics. Widening the window is not a fix: CI saw the
+        // same failure at 1280 with an ordinary name.
+        await resetRoom(request);
+        await page.setViewportSize(DESKTOP);
+        const long = 'VeryLongRoomName_'.repeat(4) + Date.now();
+        await page.goto(`/room/${long}`);
+        await page.waitForSelector('#display-name');
+        await page.fill('#display-name', 'OverflowChecker');
+        await page.click('.join-btn');
+        await expect(page.locator('.room-container')).toBeVisible({ timeout: 20000 });
+        await page.waitForTimeout(1500);
+
+        const layout = await page.evaluate(() => {
+            const header = document.querySelector('.room-header') as HTMLElement;
+            const badge = document.querySelector('.room-header .badge-success') as HTMLElement;
+            const box = badge.getBoundingClientRect();
+            return {
+                overflows: header.scrollWidth > header.clientWidth,
+                badgeRight: box.right,
+                viewport: window.innerWidth,
+            };
+        });
+        expect(layout.overflows, 'room header must not overflow its own bar').toBe(false);
+        expect(layout.badgeRight, 'badges must stay inside the viewport').toBeLessThanOrEqual(
+            layout.viewport,
+        );
+        expect(await expectReadableText(page, '.room-header', 'room header', 3.0)).toBeGreaterThan(3.0);
+    });
 });

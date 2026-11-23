@@ -177,6 +177,7 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
     padding: 12px 24px;
     background: var(--bg-glass);
     backdrop-filter: var(--glass-backdrop);
@@ -199,6 +200,10 @@ body {
 
 .room-header h2 {
     margin: 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: var(--font-size-lg);
     font-weight: 600;
     color: var(--text-primary);

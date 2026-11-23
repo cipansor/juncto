@@ -83,20 +83,9 @@ function decodePng(buffer: Buffer): { width: number; height: number; pixels: Buf
     return { width, height, pixels, channels };
 }
 
-type TextRun = {
-    color: string;
-    /** Declared channels, before opacity. */
-    rgb: Rgb;
-    /** Inherited opacity x the colour's own alpha. */
-    alpha: number;
-    rects: { x: number; y: number; width: number; height: number }[];
-};
+type Rect = { x: number; y: number; width: number; height: number };
 
-/** The colour a translucent run actually shows over `bg`. */
-function composited(run: TextRun, bg: Rgb): Rgb {
-    const mix = (c: number, b: number) => Math.round(c * run.alpha + b * (1 - run.alpha));
-    return [mix(run.rgb[0], bg[0]), mix(run.rgb[1], bg[1]), mix(run.rgb[2], bg[2])];
-}
+type TextRun = { color: string; rects: Rect[] };
 
 /**
  * Every run of text inside the element, with the colour that run is painted in.
@@ -111,13 +100,32 @@ async function textRuns(page: Page, selector: string): Promise<TextRun[]> {
     return page.locator(selector).first().evaluate((el) => {
         const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
         const range = document.createRange();
-        type Run = {
-            color: string;
-            rgb: [number, number, number];
-            alpha: number;
-            rects: { x: number; y: number; width: number; height: number }[];
-        };
+        type Run = { color: string; rects: { x: number; y: number; width: number; height: number }[] };
         const runs: Run[] = [];
+
+        // `getClientRects` reports where the text *would* be laid out, not where
+        // it can be seen. A title clipped with `overflow: hidden` still reports
+        // its full unwrapped width: the room header's `<h2>` clipped at 836px
+        // but reported a 1202px text rect, so the clipped-away part was sampled
+        // and paired with whatever lay behind the element (white on the pale
+        // page, 2.45:1). Intersect with every clipping ancestor in turn.
+        const visible = (r: { x: number; y: number; width: number; height: number }, from: Element | null) => {
+            let { x, y, width, height } = r;
+            for (let el: Element | null = from; el; el = el.parentElement) {
+                const cs = getComputedStyle(el);
+                if (cs.overflow === 'visible' && cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
+                const box = el.getBoundingClientRect();
+                const right = Math.min(x + width, box.right);
+                const bottom = Math.min(y + height, box.bottom);
+                x = Math.max(x, box.left);
+                y = Math.max(y, box.top);
+                width = right - x;
+                height = bottom - y;
+                if (width <= 0 || height <= 0) return null;
+            }
+            return { x, y, width, height };
+        };
+
         for (let node = walker.nextNode(); node; node = walker.nextNode()) {
             if (!node.textContent?.trim()) continue;
             const parent = node.parentElement;
@@ -125,28 +133,15 @@ async function textRuns(page: Page, selector: string): Promise<TextRun[]> {
             const style = getComputedStyle(parent);
             if (style.visibility === 'hidden' || style.display === 'none') continue;
 
-            // `opacity` is inherited and multiplies down the tree, so a faded
-            // label's `color` is not the colour that reaches the screen. The
-            // declared colour would score 21:1 for white text at 50% opacity on
-            // black, where the eye sees 5.28:1. The ratio is computed against
-            // each sampled backdrop, because the blend depends on it: white at
-            // 30% is dark on a black card and nearly white on a white one.
-            let alpha = 1;
-            for (let e: Element | null = parent; e; e = e.parentElement) {
-                alpha *= parseFloat(getComputedStyle(e).opacity);
-            }
-            if (alpha === 0) continue;
-
-            const m = style.color.match(/rgba?\(([^)]+)\)/);
-            const parts = m ? m[1].split(',').map((p) => parseFloat(p.trim())) : [0, 0, 0];
-            const rgb: [number, number, number] = [parts[0], parts[1], parts[2]];
-            const a = Math.min(1, alpha * (parts[3] ?? 1));
+            if (parseFloat(style.opacity) === 0) continue;
 
             range.selectNodeContents(node);
             const rects = Array.from(range.getClientRects())
                 .filter((r) => r.width > 0 && r.height > 0)
-                .map((r) => ({ x: r.x, y: r.y, width: r.width, height: r.height }));
-            if (rects.length > 0) runs.push({ color: style.color, rgb, alpha: a, rects });
+                .map((r) => ({ x: r.x, y: r.y, width: r.width, height: r.height }))
+                .map((r) => visible(r, parent))
+                .filter((r): r is { x: number; y: number; width: number; height: number } => r !== null);
+            if (rects.length > 0) runs.push({ color: style.color, rects });
         }
         return runs;
     });
@@ -170,9 +165,9 @@ async function textRuns(page: Page, selector: string): Promise<TextRun[]> {
  */
 export async function paintedBackdrops(page: Page, selector: string): Promise<Rgb[]> {
     expect(await page.locator(selector).first().boundingBox(), `no layout box for ${selector}`).not.toBeNull();
-    const rects = (await textRuns(page, selector)).flatMap((run) => run.rects);
+    const { painted, glyphs, runs } = await glyphLayers(page, selector);
+    const rects = runs.flatMap((run) => run.rects);
     expect(rects.length, `no text line boxes for ${selector}`).toBeGreaterThan(0);
-    const { painted, glyphs } = await glyphLayers(page, selector);
     return rects
         .map((rect) => dominantBackdrop(painted, glyphs, rect))
         .filter((rgb): rgb is Rgb => rgb !== null);
@@ -191,6 +186,70 @@ const PROBE_FILLS: [Rgb, Rgb] = [
     [255, 0, 255],
     [0, 255, 0],
 ];
+
+/**
+ * The colour a run is painted in, measured from the rendered pixels.
+ *
+ * `color` alone is not the answer: `opacity` multiplies a whole subtree, so a
+ * faded panel and the text inside it fade together and the text keeps its
+ * declared colour relative to that panel. Black text on a half-opacity white
+ * panel over black renders at 5.32:1, and a formula that fades the text without
+ * fading the panel reports 2.63:1 — a false failure on readable text.
+ *
+ * A glyph's edge is antialiased toward whatever surface is behind it, so most
+ * glyph pixels are a blend of ink and paper. The ink is therefore taken from the
+ * pixels that differ most from their *own* surface: those have the highest
+ * coverage. Averaging all glyph pixels, or taking the darkest and lightest, both
+ * let a partly covered edge stand in for the ink — on the room header that
+ * reported the green badge as `rgb(9, 111, 77)` against `rgb(9, 28, 37)` where
+ * the ink is `rgb(16, 185, 129)`.
+ *
+ * The ink is measured once for the run and then scored against every surface
+ * under it. Measuring per surface instead fragments the sample: a text rect
+ * grazing a border splits into several surfaces, and the sliver over the border
+ * holds only edge pixels, whose blend is not the ink. Scoring one measured ink
+ * against every surface is still sound for text that straddles a boundary —
+ * white letters over a black/white split measure as white and fail at 1.00:1
+ * against the white half, which is the case the audit exists for.
+ */
+function measureInk(rendered: Shot, painted: Shot, glyphs: Uint8Array, rect: Rect): Rgb | null {
+    const { width, height } = rendered;
+    const y0 = Math.max(0, Math.floor(rect.y));
+    const y1 = Math.min(Math.floor(rect.y + rect.height), height - 1);
+    const x0 = Math.max(0, Math.floor(rect.x));
+    const x1 = Math.min(Math.floor(rect.x + rect.width), width - 1);
+    if (x1 < x0 || y1 < y0) return null;
+
+    const samples: { distance: number; rgb: Rgb }[] = [];
+    for (let y = y0; y <= y1; y += 1) {
+        for (let x = x0; x <= x1; x += 1) {
+            const i = y * width + x;
+            if (glyphs[i] !== 1) continue;
+            const ro = i * rendered.channels;
+            const bo = i * painted.channels;
+            const rgb: Rgb = [rendered.pixels[ro], rendered.pixels[ro + 1], rendered.pixels[ro + 2]];
+            const distance =
+                Math.abs(rgb[0] - painted.pixels[bo]) +
+                Math.abs(rgb[1] - painted.pixels[bo + 1]) +
+                Math.abs(rgb[2] - painted.pixels[bo + 2]);
+            samples.push({ distance, rgb });
+        }
+    }
+    if (samples.length === 0) return null;
+
+    samples.sort((a, b) => b.distance - a.distance);
+    const take = Math.max(1, Math.floor(samples.length / 10));
+    const best = samples.slice(0, take);
+    const sum = best.reduce(
+        (acc, s) => [acc[0] + s.rgb[0], acc[1] + s.rgb[1], acc[2] + s.rgb[2]],
+        [0, 0, 0],
+    );
+    return [
+        Math.round(sum[0] / best.length),
+        Math.round(sum[1] / best.length),
+        Math.round(sum[2] / best.length),
+    ];
+}
 
 /**
  * The surface behind the glyphs, plus a mask of which pixels a glyph covers.
@@ -217,10 +276,13 @@ const PROBE_FILLS: [Rgb, Rgb] = [
  * is blind. The forced fill also catches translucent text, which a
  * same-colour-as-rendered diff would miss.
  */
-async function glyphLayers(page: Page, selector: string): Promise<{ painted: Shot; glyphs: Uint8Array }> {
-    const applyFill = async (fill: string | null) => {
+async function glyphLayers(
+    page: Page,
+    selector: string,
+): Promise<{ rendered: Shot; painted: Shot; glyphs: Uint8Array; runs: TextRun[] }> {
+    const applyFill = async (fill: string | null, freezeOnly = false) => {
         const ok = await page.evaluate(
-            ([sel, value]) => {
+            ([sel, value, frozen]) => {
                 const el = document.querySelector(sel as string);
                 if (!el) return false;
                 const id = 'contrast-probe-style';
@@ -230,7 +292,7 @@ async function glyphLayers(page: Page, selector: string): Promise<{ painted: Sho
                     style.id = id;
                     document.head.appendChild(style);
                 }
-                if (value === null) {
+                if (value === null && !frozen) {
                     el.removeAttribute('data-contrast-probe');
                     style.textContent = '';
                     return true;
@@ -244,19 +306,31 @@ async function glyphLayers(page: Page, selector: string): Promise<{ painted: Sho
                 // Animations and a blinking caret change the pixels between the
                 // three screenshots, so the "surface" and the glyph mask would
                 // describe different frames. Freeze them for the probe.
+                const fillRule = value === null ? '' : `-webkit-text-fill-color: ${value} !important;`;
                 style.textContent =
-                    `[data-contrast-probe], [data-contrast-probe] * { -webkit-text-fill-color: ${value} !important;` +
+                    `[data-contrast-probe], [data-contrast-probe] * { ${fillRule}` +
                     ' animation: none !important; transition: none !important; caret-color: transparent !important; }';
                 return true;
             },
-            [selector, fill] as [string, string | null],
+            [selector, fill, freezeOnly] as [string, string | null, boolean],
         );
         return ok;
     };
 
     try {
+        // The as-rendered frame is taken first and under the same freeze as the
+        // probe frames. Capturing geometry before freezing let an entrance
+        // animation move the text between the rects and the shots, so the mask
+        // was read where the text no longer was.
+        await applyFill(null, true);
+        const rendered = decodePng(await page.screenshot());
+        // Geometry is read here, inside the frozen window, so the rects describe
+        // the frame the pixels came from. Reading it after this function returns
+        // would restore the animation first, and an entrance transition would
+        // then move the text out from under the mask.
+        const runs = await textRuns(page, selector);
         if (!(await applyFill('transparent'))) {
-            return { painted: decodePng(await page.screenshot()), glyphs: new Uint8Array(0) };
+            return { rendered, painted: rendered, glyphs: new Uint8Array(0), runs };
         }
         const painted = decodePng(await page.screenshot());
 
@@ -276,7 +350,7 @@ async function glyphLayers(page: Page, selector: string): Promise<{ painted: Sho
                 Math.abs(a.pixels[o + 2] - b.pixels[o + 2]);
             if (delta > GLYPH_DELTA) glyphs[i] = 1;
         }
-        return { painted, glyphs };
+        return { rendered, painted, glyphs, runs };
     } finally {
         await applyFill(null);
     }
@@ -350,10 +424,8 @@ export async function expectReadableText(
     label: string,
     minRatio = AA_TEXT,
 ): Promise<number> {
-    const runs = await textRuns(page, selector);
+    const { rendered, painted, glyphs, runs } = await glyphLayers(page, selector);
     expect(runs.length, `no text inside ${label}`).toBeGreaterThan(0);
-
-    const { painted, glyphs } = await glyphLayers(page, selector);
 
     let worst: { ratio: number; color: string; bg: Rgb } | null = null;
     let measured = 0;
@@ -361,18 +433,18 @@ export async function expectReadableText(
         if (!parseColor(run.color)) continue;
         for (const rect of run.rects) {
             const backdrops = backdropsForRect(painted, glyphs, rect);
-            if (backdrops.length === 0) continue; // No visible glyphs on this line.
+            const ink = measureInk(rendered, painted, glyphs, rect);
+            if (backdrops.length === 0 || ink === null) continue; // No visible glyphs here.
             measured += 1;
-            // Every colour under the letters is scored, with no minimum share.
+            // Every surface under the letters is scored, with no minimum share.
             // A share threshold is a false-pass by construction: text crossing a
             // narrow unreadable band is exactly the case that matters, and the
             // band is precisely what a threshold discards.
             for (const bg of backdrops) {
-                const fg = composited(run, bg);
-                const ratio = contrastRatio(fg, bg);
+                const ratio = contrastRatio(ink, bg);
                 expect(Number.isFinite(ratio), `${label}: non-finite contrast`).toBe(true);
                 if (worst === null || ratio < worst.ratio) {
-                    worst = { ratio, color: `rgb(${fg.join(', ')})`, bg };
+                    worst = { ratio, color: `rgb(${ink.join(', ')})`, bg };
                 }
             }
         }

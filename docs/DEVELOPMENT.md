@@ -177,17 +177,26 @@ card over the gradient users see. Five details make the sample honest:
   backdrop changes nothing there. Two forced fills differ from *each other* whatever lies
   underneath, so neither is blind. Both shots are forced rather than one being the real
   render for the same reason.
-* **Per text run, at its effective colour.** Colour is read per text node, not from the
-  audited element. The audit target is often a container — `.chat-container` holds a white
-  heading, a muted label and a white-on-blue button — so the container's own colour (black,
-  inherited) scored against the dark card would report 1.44:1 for a container whose text is
-  all legible. The colour is the *composited* one: inherited `opacity` multiplies down the
-  tree, and the run is blended over the sampled backdrop, so white at 30% is `rgb(77, 77, 77)`
-  and 2.48:1 on a black card but still white and 1.00:1 on a white one. Scoring the
-  declaration let faded text pass, and a mask that missed translucent glyphs skipped the line
-  entirely, so a readable sibling could carry the whole element to a pass. Blending toward a
-  fixed colour instead of the sampled one is not a safe simplification: toward black it calls
-  faded white on white 8.45:1 and passes it.
+* **Per text run, with the ink measured from pixels.** Colour is read per text node, not
+  from the audited element. The audit target is often a container — `.chat-container` holds a
+  white heading, a muted label and a white-on-blue button — so the container's own colour
+  (black, inherited) scored against the dark card would report 1.44:1 for a container whose
+  text is all legible. The ink itself is *measured*, not modelled from `color` and `opacity`.
+  Modelling cannot work: `opacity` multiplies a whole subtree, so a faded panel and the text
+  inside it fade together and the text keeps its declared colour relative to that panel.
+  Black text on a half-opacity white panel over black renders at 5.32:1; fading the declared
+  colour without fading the panel reports 2.63:1 and rejects readable text. Measuring the ink
+  avoids the question entirely. Glyph edges are antialiased toward the surface, so most glyph
+  pixels are a blend; the ink is taken from the tenth of glyph pixels that differ most from
+  their own surface, which are the ones with the highest coverage. Averaging, or taking the
+  darkest and lightest tenths, lets a half-covered edge stand in for the ink — on the room
+  header that read the green badge as `rgb(9, 111, 77)` against `rgb(9, 28, 37)` where the
+  ink is `rgb(16, 185, 129)`, and the audit failed a legible badge.
+  One ink is measured per run and scored against every surface under it, rather than per
+  surface: a text rect grazing a border splits into several surfaces, and the sliver over the
+  border holds only edge pixels. Scoring one ink against every surface is still sound for
+  text straddling a boundary — white letters over a black/white split measure as white and
+  fail at 1.00:1 against the white half.
 * **Per line box.** The sample is restricted to the text's own line boxes, so a short
   message in a wide paragraph is measured where the glyphs are, not where the box happens
   to be empty. A gradient crossing the text yields one surface per line and the worst line
@@ -199,8 +208,8 @@ card over the gradient users see. Five details make the sample honest:
   audit can change verdict between machines.
 
 Animation and the text caret are frozen for the duration of the probe (`animation: none`,
-`caret-color: transparent` on the audited subtree). Three screenshots of a moving element are
-three different frames: a fading label moved between the surface shot and the mask shot, so
+`caret-color: transparent` on the audited subtree). Four screenshots of a moving element are
+four different frames: a fading label moved between the surface shot and the mask shot, so
 the surface sampled under its glyphs was the glyph itself and the chat panel reported 1.11:1
 instead of 3.98:1. A frozen frame is the only thing that can be measured. Note that freezing
 pins the *first* keyframe, not the settled state: a fade that begins unreadable is reported
@@ -208,6 +217,30 @@ unreadable, which is the conservative reading. The chat-panel assertion in
 `contrast-audit.spec.ts` is what proves this — removing the freeze turns it red at 1.11:1,
 whereas a synthetic fade in the helper spec was too slow to land mid-frame and passed either
 way.
+
+**Line geometry is read inside the frozen window too**, in the same call that takes the
+screenshots. Reading it afterwards restores the animation first, so an entrance transition
+slides the text between the rects and the pixels; the mask is then sampled where the text used
+to be, finds no glyphs, and the line is skipped — a vacuous pass rather than a failure. This
+is why `glyphLayers` returns the runs as well as the shots: the two have to come from one
+frame.
+
+**Text is clipped to what is actually visible.** `getClientRects` reports where text *would*
+be laid out, not where it can be seen, so a title clipped with `overflow: hidden` still
+reports its full unwrapped width — the room header's `<h2>` clipped at 836px but reported a
+1202px text rect. Sampling the clipped-away part measures glyphs that are not on screen and
+pairs them with whatever lies behind the element; the header's long name then read as white
+on the pale page at 2.45:1. Every clipping ancestor is intersected in turn, so text inside a
+scrolling panel is measured only where it is visible.
+
+That clipping exposed a real layout defect rather than a measurement one. `.room-header` is a
+single flex row, and with no shrink limit the title grew to its full text width, the row
+overflowed, and the badges were laid out past the right edge of the bar onto the page behind
+it — genuinely unreadable, and reported by the audit as light-on-light. The title now
+shrinks (`min-width: 0`, `overflow: hidden`, `text-overflow: ellipsis`), and
+`contrast-audit.spec.ts` asserts both that the header does not overflow and that the badges
+stay inside the viewport, with a room name long enough to overflow at every width so the
+verdict does not depend on font metrics.
 
 Only rows inside the screenshot are read. A line below the fold has no pixels to measure,
 and reading past the last row yields `undefined` channels and a `NaN` ratio. A `NaN` does
